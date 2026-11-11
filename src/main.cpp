@@ -2,8 +2,9 @@
  * @file main.cpp
  * @brief ZLRomi NEO Music Player - 主程序
  * 
- * ESP32-S3 + ST7789 + PCM5102A I2S + Bluetooth A2DP
- * LVGL GUI + 拼音输入法 + 7键焦点导航 + 网易云API
+ * ESP32-S3 + ST7789(240x320) + PCM5102A I2S
+ * LVGL v9 GUI + 拼音输入法 + 7键焦点导航 + 网易云API
+ * ESP32-audioI2S 流媒体播放引擎
  */
 #include <Arduino.h>
 #include <lvgl.h>
@@ -11,11 +12,10 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <SPIFFS.h>
-#include <SPIFFS.h>
 
 #include "types.h"
 #include "ui.h"
-#include "audio.h"
+#include "audio_engine.h"
 #include "api.h"
 #include "input.h"
 #include "settings.h"
@@ -28,7 +28,7 @@
 #define SCREEN_H      320
 
 // =====================================================================
-//  全局变量 (避免全局构造器崩溃，用指针延迟初始化)
+//  全局变量
 // =====================================================================
 static TFT_eSPI *tft_ptr = nullptr;
 static SongInfo g_current_song;
@@ -39,17 +39,19 @@ static UrlInfo g_play_url;
 static bool g_wifi_connected = false;
 static int g_playlist_index = -1;
 
-// Toast自动隐藏计时
-static uint32_t s_toast_start = 0;
-#define TOAST_DURATION_MS 2500
-
 // =====================================================================
-//  回调函数
+//  前向声明
 // =====================================================================
 static void on_button(ButtonId btn, ButtonEvent evt);
 static void on_audio_progress(int pos_ms, int dur_ms);
 static void on_audio_state(PlayState state);
 static void on_audio_error(const char* msg);
+static void play_song_by_index(int index);
+static void play_next();
+static void play_prev();
+static void toggle_play_pause();
+static void connect_wifi(const char* ssid, const char* pass);
+static void do_search();
 
 // =====================================================================
 //  播放控制逻辑
@@ -65,25 +67,27 @@ static void play_song_by_index(int index) {
     Serial.printf("[Play] #%d: %s - %s\n", index,
                   g_current_song.name, g_current_song.artist);
 
-    // 更新UI
     ui_update_song(&g_current_song);
+    ui_show_toast("\xe6\xad\xa3\xe5\x9c\xa8\xe5\x8a\xa0\xe8\xbd\xbd...");
 
-    // 获取播放URL
+    // 获取播放URL (带音质降级)
     const Settings *cfg = settings_get();
     if (api_get_url(g_current_song.id, cfg->quality, &g_play_url)) {
         if (g_play_url.valid) {
             audio_play_url(g_play_url.url);
             ui_navigate_to(STATE_PLAYING);
+            ui_show_toast("\xe6\x92\xad\xe6\x94\xbe\xe4\xb8\xad");
 
-            // 异步加载歌词
+            // 加载歌词
+            memset(&g_lyrics, 0, sizeof(g_lyrics));
             if (api_get_lyrics(g_current_song.id, &g_lyrics)) {
                 Serial.printf("[Lyrics] Loaded %d lines\n", g_lyrics.count);
             }
         } else {
-            ui_show_toast("无法获取播放链接");
+            ui_show_toast("\xe6\x97\xa0\xe6\xb3\x95\xe8\x8e\xb7\xe5\x8f\x96\xe6\x92\xad\xe6\x94\xbe\xe9\x93\xbe\xe6\x8e\xa5");
         }
     } else {
-        ui_show_toast("获取播放链接失败");
+        ui_show_toast("\xe8\x8e\xb7\xe5\x8f\x96\xe6\x92\xad\xe6\x94\xbe\xe9\x93\xbe\xe6\x8e\xa5\xe5\xa4\xb1\xe8\xb4\xa5");
     }
 }
 
@@ -95,7 +99,7 @@ static void play_next() {
         next = cfg->auto_play ? 0 : -1;
     }
     if (next >= 0) play_song_by_index(next);
-    else ui_show_toast("已是最后一首");
+    else ui_show_toast("\xe5\xb7\xb2\xe6\x98\xaf\xe6\x9c\x80\xe5\x90\x8e\xe4\xb8\x80\xe9\xa6\x96");
 }
 
 static void play_prev() {
@@ -106,7 +110,7 @@ static void play_prev() {
         prev = cfg->auto_play ? g_search_count - 1 : -1;
     }
     if (prev >= 0) play_song_by_index(prev);
-    else ui_show_toast("已是第一首");
+    else ui_show_toast("\xe5\xb7\xb2\xe6\x98\xaf\xe7\xac\xac\xe4\xb8\x80\xe9\xa6\x96");
 }
 
 static void toggle_play_pause() {
@@ -117,12 +121,35 @@ static void toggle_play_pause() {
     } else if (st == PLAY_PAUSED) {
         audio_resume();
         g_current_song.playing = true;
-    } else if (g_playlist_index >= 0) {
-        // 重新播放当前歌曲
-        if (g_play_url.valid) {
-            audio_play_url(g_play_url.url);
-            g_current_song.playing = true;
-        }
+    } else if (g_playlist_index >= 0 && g_play_url.valid) {
+        audio_play_url(g_play_url.url);
+        g_current_song.playing = true;
+    }
+}
+
+// =====================================================================
+//  搜索执行
+// =====================================================================
+static void do_search() {
+    const char* kw = ui_get_search_keyword();
+    if (!kw || strlen(kw) == 0) {
+        ui_show_toast("\xe8\xaf\xb7\xe8\xbe\x93\xe5\x85\xa5\xe6\x90\x9c\xe7\xb4\xa2\xe5\x85\xb3\xe9\x94\xae\xe8\xaf\x8d");
+        return;
+    }
+
+    ui_show_toast("\xe6\x90\x9c\xe7\xb4\xa2\xe4\xb8\xad...");
+    Serial.printf("[Search] Keyword: %s\n", kw);
+
+    g_search_count = api_search(kw, g_search_results, 20);
+    if (g_search_count > 0) {
+        ui_update_search_results(g_search_results, g_search_count);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "\xe6\x89\xbe\xe5\x88\xb0 %d \xe9\xa6\x96\xe6\xad\x8c\xe6\x9b\xb2", g_search_count);
+        ui_show_toast(buf);
+    } else if (g_search_count == 0) {
+        ui_show_toast("\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0\xe7\xbb\x93\xe6\x9e\x9c");
+    } else {
+        ui_show_toast("\xe6\x90\x9c\xe7\xb4\xa2\xe5\xa4\xb1\xe8\xb4\xa5");
     }
 }
 
@@ -130,7 +157,14 @@ static void toggle_play_pause() {
 //  WiFi连接
 // =====================================================================
 static void connect_wifi(const char* ssid, const char* pass) {
+    if (!ssid || strlen(ssid) == 0) {
+        ui_show_toast("SSID\xe4\xb8\xba\xe7\xa9\xba");
+        return;
+    }
+
     Serial.printf("[WiFi] Connecting to %s...\n", ssid);
+    ui_show_toast("\xe8\xbf\x9e\xe6\x8e\xa5WiFi\xe4\xb8\xad...");
+
     WiFi.begin(ssid, pass);
 
     int attempts = 0;
@@ -143,11 +177,13 @@ static void connect_wifi(const char* ssid, const char* pass) {
     ui_set_wifi_status(g_wifi_connected);
     if (g_wifi_connected) {
         Serial.println("[WiFi] Connected");
-        ui_show_toast("WiFi Connected");
+        Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+        ui_show_toast("WiFi\xe5\xb7\xb2\xe8\xbf\x9e\xe6\x8e\xa5");
         settings_set_wifi(ssid, pass);
+        api_init();
     } else {
         Serial.println("[WiFi] Failed");
-        ui_show_toast("WiFi Failed");
+        ui_show_toast("WiFi\xe8\xbf\x9e\xe6\x8e\xa5\xe5\xa4\xb1\xe8\xb4\xa5");
     }
 }
 
@@ -155,6 +191,7 @@ static void connect_wifi(const char* ssid, const char* pass) {
 //  按键事件处理 (完整的7键导航)
 // =====================================================================
 static void on_button(ButtonId btn, ButtonEvent evt) {
+    // RST长按重启
     if (evt == EVT_LONG_PRESS && btn == BTN_RST) {
         ESP.restart();
         return;
@@ -176,16 +213,31 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
                 ui_navigate_to(STATE_SEARCH);
             } else if (btn == BTN_DOWN) {
                 ui_navigate_to(STATE_SETTINGS);
+            } else if (btn == BTN_UP) {
+                // 如果有正在播放的歌，进入歌词页
+                if (g_playlist_index >= 0 && g_lyrics.has_lyrics) {
+                    ui_navigate_to(STATE_LYRICS);
+                }
             }
-            // UP: 预留（将来用于播放列表/音量等）
             break;
 
         case STATE_SEARCH:
-            // 键盘打开时，只处理SET返回，其他按键交给LVGL keyboard处理
             if (btn == BTN_SET) {
                 ui_navigate_to(STATE_MAIN);
+            } else if (btn == BTN_OK) {
+                // 如果搜索结果有内容且keyboard已隐藏，选择当前焦点歌曲
+                if (g_search_count > 0) {
+                    int fi = ui_get_focus_index();
+                    if (fi >= 0 && fi < g_search_count) {
+                        play_song_by_index(fi);
+                    } else {
+                        do_search();
+                    }
+                } else {
+                    do_search();
+                }
             }
-            // 其他按键不拦截，让LVGL indev -> keyboard -> textarea 自行处理
+            // 其他按键交给LVGL keyboard/textarea处理
             break;
 
         case STATE_PLAYING:
@@ -205,8 +257,6 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
         case STATE_LYRICS:
             if (btn == BTN_SET || btn == BTN_DOWN) {
                 ui_navigate_to(STATE_PLAYING);
-            } else if (btn == BTN_UP) {
-                // 手动向上滚动歌词(可选)
             }
             break;
 
@@ -218,17 +268,19 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
             } else if (btn == BTN_OK) {
                 int fi = ui_get_focus_index();
                 switch (fi) {
-                    case 0: // WiFi配置
+                    case 0: // WiFi设置
                         ui_navigate_to(STATE_WIFI);
                         break;
                     case 1: { // 音量调节
                         Settings *s = settings_get_mutable();
-                        s->volume = (s->volume + 10) % 110;
-                        if (s->volume > 100) s->volume = 0;
-                        audio_set_volume(s->volume);
+                        // 映射 0-100 -> 0-21
+                        int hw_vol = audio_get_volume();
+                        hw_vol = (hw_vol + 1) % 22;
+                        audio_set_volume(hw_vol);
+                        s->volume = (hw_vol * 100) / 21;
                         settings_save();
-                        char buf[20];
-                        snprintf(buf, sizeof(buf), "音量: %d%%", s->volume);
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "\xe9\x9f\xb3\xe9\x87\x8f: %d/21", hw_vol);
                         ui_show_toast(buf);
                         break;
                     }
@@ -236,9 +288,13 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
                         Settings *s = settings_get_mutable();
                         s->quality = (AudioQuality)((s->quality + 1) % QUALITY_COUNT);
                         settings_save();
-                        const char *qnames[] = {"标准 128k", "高质 320k", "无损 FLAC"};
-                        char buf[30];
-                        snprintf(buf, sizeof(buf), "音质: %s", qnames[s->quality]);
+                        const char *qnames[] = {
+                            "\xe6\xa0\x87\xe5\x87\x86 128k",
+                            "\xe9\xab\x98\xe8\xb4\xa8 320k",
+                            "\xe6\x97\xa0\xe6\x8d\x9f FLAC"
+                        };
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "\xe9\x9f\xb3\xe8\xb4\xa8: %s", qnames[s->quality]);
                         ui_show_toast(buf);
                         break;
                     }
@@ -246,14 +302,18 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
                         Settings *s = settings_get_mutable();
                         s->bt_enabled = !s->bt_enabled;
                         settings_save();
-                        ui_show_toast(s->bt_enabled ? "蓝牙: 开" : "蓝牙: 关");
+                        ui_show_toast(s->bt_enabled ?
+                            "\xe8\x93\x9d\xe7\x89\x99: \xe5\xbc\x80" :
+                            "\xe8\x93\x9d\xe7\x89\x99: \xe5\x85\xb3");
                         break;
                     }
                     case 4: { // 自动播放
                         Settings *s = settings_get_mutable();
                         s->auto_play = !s->auto_play;
                         settings_save();
-                        ui_show_toast(s->auto_play ? "自动播放: 开" : "自动播放: 关");
+                        ui_show_toast(s->auto_play ?
+                            "\xe8\x87\xaa\xe5\x8a\xa8\xe6\x92\xad\xe6\x94\xbe: \xe5\xbc\x80" :
+                            "\xe8\x87\xaa\xe5\x8a\xa8\xe6\x92\xad\xe6\x94\xbe: \xe5\x85\xb3");
                         break;
                     }
                     case 5: // 关于
@@ -270,10 +330,9 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
                 ui_navigate_to(STATE_SETTINGS);
             } else if (btn == BTN_OK) {
                 // 连接WiFi
-                const char *ssid = lv_textarea_get_text(ui_get_search_textarea());
-                // WiFi界面有自己的textarea，这里简化处理
-                // 实际应从s_ta_ssid和s_ta_pass获取
-                ui_show_toast("请使用键盘输入后按OK连接");
+                const char *ssid = ui_get_wifi_ssid();
+                const char *pass = ui_get_wifi_pass();
+                connect_wifi(ssid, pass);
             }
             break;
     }
@@ -290,8 +349,14 @@ static void on_audio_progress(int pos_ms, int dur_ms) {
 static void on_audio_state(PlayState state) {
     Serial.printf("[Audio] State: %d\n", state);
     if (state == PLAY_ERROR) {
-        ui_show_toast("播放出错");
+        ui_show_toast("\xe6\x92\xad\xe6\x94\xbe\xe5\x87\xba\xe9\x94\x99");
         g_current_song.playing = false;
+    } else if (state == PLAY_STOPPED) {
+        // 播放结束，自动下一首
+        if (g_current_song.playing) {
+            g_current_song.playing = false;
+            play_next();
+        }
     }
 }
 
@@ -309,7 +374,7 @@ void setup() {
     Serial.println("\n=== ZLRomi NEO Music Player ===");
     Serial.println("[1] Starting...");
 
-    // 初始化SPIFFS（用于存储中文字体）
+    // 初始化SPIFFS
     if (!SPIFFS.begin(true)) {
         Serial.println("[SPIFFS] Mount failed!");
     } else {
@@ -320,9 +385,9 @@ void setup() {
     // 初始化设置
     Serial.println("[2] Settings init...");
     settings_init();
-    Serial.println("[3] Settings loaded");
     const Settings *cfg = settings_get();
-    Serial.printf("[4] Config: vol=%d bt=%d\n", cfg->volume, cfg->bt_enabled);
+    Serial.printf("[3] Config: vol=%d bt=%d quality=%d\n",
+                  cfg->volume, cfg->bt_enabled, cfg->quality);
 
     // 初始化屏幕背光
     pinMode(PIN_LCD_BL, OUTPUT);
@@ -336,11 +401,11 @@ void setup() {
     tft_ptr->writecommand(0x36);
     tft_ptr->writedata(0x08);  // BGR
     tft_ptr->fillScreen(TFT_BLACK);
-    digitalWrite(PIN_LCD_BL, HIGH);  // ESP32-S3不支持analogWrite，直接开背光
+    digitalWrite(PIN_LCD_BL, HIGH);
 
     // 初始化LVGL
     lv_init();
-    static uint8_t draw_buf[SCREEN_W * 40] __attribute__((aligned(4))); // 减小buffer
+    static uint8_t draw_buf[SCREEN_W * 40] __attribute__((aligned(4)));
     lv_display_t *disp = lv_tft_espi_create(SCREEN_W, SCREEN_H,
                                              draw_buf, sizeof(draw_buf));
     if (!disp) {
@@ -355,8 +420,7 @@ void setup() {
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(indev, input_lvgl_read_cb);
-    
-    // 绑定keypad到default group（关键！否则按键无法导航焦点）
+
     lv_group_t *group = lv_group_get_default();
     if (!group) {
         group = lv_group_create();
@@ -364,7 +428,7 @@ void setup() {
     }
     lv_indev_set_group(indev, group);
 
-    // 主题
+    // 深色主题
     lv_theme_t *th = lv_theme_default_init(disp,
         lv_color_hex(0xFF6B6B), lv_color_hex(0x4ECDC4),
         true, &lv_font_montserrat_14);
@@ -377,25 +441,27 @@ void setup() {
     ui_init();
     ui_create_screens();
 
-    audio_init();
-    audio_set_volume(cfg->volume);
-    audio_set_quality(cfg->quality);
+    // 初始化音频引擎 (ESP32-audioI2S)
+    audio_engine_init();
+    // 映射设置中的0-100音量到0-21
+    int hw_vol = (cfg->volume * 21) / 100;
+    if (hw_vol > 21) hw_vol = 21;
+    audio_set_volume(hw_vol);
     audio_set_progress_callback(on_audio_progress);
     audio_set_state_callback(on_audio_state);
     audio_set_error_callback(on_audio_error);
-
-    api_init();
 
     // 连接WiFi
     if (strlen(cfg->wifi_ssid) > 0) {
         connect_wifi(cfg->wifi_ssid, cfg->wifi_pass);
     } else {
         ui_set_wifi_status(false);
+        Serial.println("[WiFi] No saved SSID, please configure via Settings");
     }
 
-    // 启动画面
+    // 启动画面 -> 主界面
     ui_navigate_to(STATE_BOOT);
-    delay(2000);
+    delay(1500);
     ui_navigate_to(STATE_MAIN);
 
     Serial.println("[OK] Ready");
@@ -405,7 +471,7 @@ void setup() {
 //  LOOP
 // =====================================================================
 void loop() {
-    // LVGL tick (v9需要手动调用)
+    // LVGL tick
     static uint32_t last_tick = 0;
     uint32_t now = millis();
     if (now != last_tick) {
@@ -419,17 +485,18 @@ void loop() {
     // LVGL处理
     lv_timer_handler();
 
-    // 音频后台任务
+    // 音频引擎核心循环 (ESP32-audioI2S解码)
     audio_task();
 
-    // 更新进度显示
-    if (g_current_song.playing) {
-        ui_update_progress(audio_get_position_ms(), audio_get_duration_ms());
+    // 更新进度显示和歌词同步
+    if (g_current_song.playing || audio_is_running()) {
+        int pos = audio_get_position_ms();
+        int dur = audio_get_duration_ms();
+        ui_update_progress(pos, dur);
 
-        // 更新歌词同步
+        // 歌词同步
         if (ui_get_state() == STATE_LYRICS && g_lyrics.has_lyrics) {
-            int line = lyrics_get_current_line(&g_lyrics,
-                                                audio_get_position_ms());
+            int line = lyrics_get_current_line(&g_lyrics, pos);
             if (line >= 0) {
                 ui_update_lyrics(&g_lyrics, line);
             }
@@ -437,10 +504,7 @@ void loop() {
     }
 
     // Toast自动隐藏
-    if (s_toast_start > 0 && millis() - s_toast_start > TOAST_DURATION_MS) {
-        // Toast由LVGL layer管理，这里不做额外处理
-        s_toast_start = 0;
-    }
+    ui_check_toast_timeout();
 
     delay(5);
 }
