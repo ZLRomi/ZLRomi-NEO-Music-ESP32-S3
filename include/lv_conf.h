@@ -125,6 +125,16 @@
 #endif
 
 /*==================
+ * FILE SYSTEM (for loading fonts from SPIFFS)
+ *==================*/
+#define LV_USE_FS_POSIX 1
+#if LV_USE_FS_POSIX
+    #define LV_FS_POSIX_LETTER 'A'
+    #define LV_FS_POSIX_PATH "/spiffs"
+    #define LV_FS_POSIX_CACHE_SIZE 0
+#endif
+
+/*==================
  * DISPLAY DRIVERS
  *==================*/
 #define LV_USE_ST7789 1

@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdio.h>
+#include <lvgl/font/lv_binfont_loader.h>
 
 // =====================================================================
 //  颜色主题
@@ -126,17 +127,16 @@ static void add_to_focus(lv_obj_t *obj) {
 }
 
 // =====================================================================
-//  全局中文字体 (TinyTTF从SPIFFS加载)
+//  全局中文字体 (从SPIFFS加载.bin位图字体)
 // =====================================================================
 static lv_font_t *s_cn_font_14 = nullptr;
 static lv_font_t *s_cn_font_16 = nullptr;
 
-// 获取中文字体指针（如果TinyTTF加载失败则回退到内置CJK）
+// 获取中文字体指针（如果加载失败则回退到内置CJK）
 static const lv_font_t* get_cn_font(int size) {
     if (size <= 14 && s_cn_font_14) return s_cn_font_14;
     if (size >= 16 && s_cn_font_16) return s_cn_font_16;
-    // 回退
-    return get_cn_font(16);
+    return &lv_font_source_han_sans_sc_16_cjk;
 }
 
 // =====================================================================
@@ -152,16 +152,21 @@ void ui_init() {
     s_focus_group = lv_group_create();
     lv_group_set_default(s_focus_group);
     
-    // 从SPIFFS加载中文字体
-#if LV_USE_TINY_TTF
-    Serial.println("[UI] Loading Chinese font from SPIFFS...");
-    s_cn_font_14 = lv_tiny_ttf_create_file("/spiffs/NotoSansSC-Regular.otf", 14);
-    s_cn_font_16 = lv_tiny_ttf_create_file("/spiffs/NotoSansSC-Regular.otf", 16);
-    if (s_cn_font_14) Serial.println("[UI] CN font 14 loaded");
-    else Serial.println("[UI] CN font 14 FAILED, using fallback");
-    if (s_cn_font_16) Serial.println("[UI] CN font 16 loaded");
-    else Serial.println("[UI] CN font 16 FAILED, using fallback");
-#endif
+    // 从SPIFFS加载中文字体 (.bin格式, LVGL路径 A:/xxx.bin)
+    Serial.println("[UI] Loading Chinese fonts from SPIFFS...");
+    s_cn_font_14 = lv_binfont_create("A:/cn_font_14.bin");
+    if (s_cn_font_14) {
+        Serial.println("[UI] CN font 14 OK");
+    } else {
+        Serial.println("[UI] CN font 14 FAILED, using fallback");
+    }
+    
+    s_cn_font_16 = lv_binfont_create("A:/cn_font_16.bin");
+    if (s_cn_font_16) {
+        Serial.println("[UI] CN font 16 OK");
+    } else {
+        Serial.println("[UI] CN font 16 FAILED, using fallback");
+    }
 }
 
 // =====================================================================

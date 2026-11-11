@@ -11,6 +11,7 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <SPIFFS.h>
+#include <SPIFFS.h>
 
 #include "types.h"
 #include "ui.h"
