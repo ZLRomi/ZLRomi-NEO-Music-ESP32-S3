@@ -9,13 +9,6 @@
 #include <string.h>
 #include <stdio.h>
 
-// TinyTTF外部函数声明（LVGL v9.6未公开头文件）
-#if LV_USE_TINY_TTF
-extern "C" {
-    lv_font_t * lv_tiny_ttf_create_file(const char * path, int32_t font_size);
-}
-#endif
-
 // =====================================================================
 //  颜色主题
 // =====================================================================
