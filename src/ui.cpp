@@ -8,7 +8,14 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdio.h>
-#include <lvgl/font/lv_binfont_loader.h>
+
+// binfont loader - declare externally since LVGL v9.6 doesn't expose it in public headers
+extern "C" {
+    struct _lv_font_t;
+    typedef struct _lv_font_t lv_font_t;
+    lv_font_t * lv_binfont_create(const char * path);
+    void lv_binfont_destroy(lv_font_t * font);
+}
 
 // =====================================================================
 //  颜色主题
