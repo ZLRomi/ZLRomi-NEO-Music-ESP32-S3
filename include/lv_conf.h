@@ -18,12 +18,12 @@
 /*=========================
    STDLIB WRAPPER SETTINGS
  *=========================*/
-#define LV_USE_STDLIB_MALLOC    LV_STDLIB_BUILTIN
+#define LV_USE_STDLIB_MALLOC    LV_STDLIB_CLIB
 #define LV_USE_STDLIB_STRING    LV_STDLIB_CLIB
 #define LV_USE_STDLIB_SPRINTF   LV_STDLIB_CLIB
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
-    #define LV_MEM_SIZE (512 * 1024U)
+    #define LV_MEM_SIZE (128 * 1024U)   // 减小到128KB，其余用PSRAM
     #define LV_MEM_POOL_EXPAND_SIZE 0
     #define LV_MEM_ADR 0
 #endif
@@ -128,6 +128,8 @@
  * DISPLAY DRIVERS
  *==================*/
 #define LV_USE_ST7789 1
+#define LV_USE_GENERIC_MIPI 1
+#define LV_USE_TFT_ESPI 1
 #define LV_USE_GENERIC_MIPI 1
 
 /*==================
