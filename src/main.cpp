@@ -10,6 +10,7 @@
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <SPIFFS.h>
 
 #include "types.h"
 #include "ui.h"
@@ -26,9 +27,9 @@
 #define SCREEN_H      320
 
 // =====================================================================
-//  全局变量
+//  全局变量 (避免全局构造器崩溃，用指针延迟初始化)
 // =====================================================================
-static TFT_eSPI tft;
+static TFT_eSPI *tft_ptr = nullptr;
 static SongInfo g_current_song;
 static SongInfo g_search_results[20];
 static int g_search_count = 0;
@@ -138,13 +139,14 @@ static void connect_wifi(const char* ssid, const char* pass) {
     }
 
     g_wifi_connected = (WiFi.status() == WL_CONNECTED);
+    ui_set_wifi_status(g_wifi_connected);
     if (g_wifi_connected) {
         Serial.println("[WiFi] Connected");
-        ui_show_toast("WiFi 已连接");
+        ui_show_toast("WiFi Connected");
         settings_set_wifi(ssid, pass);
     } else {
         Serial.println("[WiFi] Failed");
-        ui_show_toast("WiFi 连接失败");
+        ui_show_toast("WiFi Failed");
     }
 }
 
@@ -163,12 +165,7 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
 
     switch (state) {
         case STATE_MAIN:
-            if (btn == BTN_UP) {
-                // 主界面没有列表，UP可以进入搜索
-                ui_navigate_to(STATE_SEARCH);
-            } else if (btn == BTN_DOWN) {
-                ui_navigate_to(STATE_SETTINGS);
-            } else if (btn == BTN_LEFT) {
+            if (btn == BTN_LEFT) {
                 play_prev();
             } else if (btn == BTN_RIGHT) {
                 play_next();
@@ -176,24 +173,18 @@ static void on_button(ButtonId btn, ButtonEvent evt) {
                 toggle_play_pause();
             } else if (btn == BTN_SET) {
                 ui_navigate_to(STATE_SEARCH);
+            } else if (btn == BTN_DOWN) {
+                ui_navigate_to(STATE_SETTINGS);
             }
+            // UP: 预留（将来用于播放列表/音量等）
             break;
 
         case STATE_SEARCH:
+            // 键盘打开时，只处理SET返回，其他按键交给LVGL keyboard处理
             if (btn == BTN_SET) {
                 ui_navigate_to(STATE_MAIN);
-            } else if (btn == BTN_OK) {
-                // 如果textarea有焦点，键盘会处理
-                // 如果搜索结果列表有焦点，播放选中项
-                int fi = ui_get_focus_index();
-                if (fi >= 0 && fi < g_search_count) {
-                    play_song_by_index(fi);
-                }
-            } else if (btn == BTN_UP) {
-                ui_move_focus(-1);
-            } else if (btn == BTN_DOWN) {
-                ui_move_focus(1);
             }
+            // 其他按键不拦截，让LVGL indev -> keyboard -> textarea 自行处理
             break;
 
         case STATE_PLAYING:
@@ -315,34 +306,62 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n=== ZLRomi NEO Music Player ===");
+    Serial.println("[1] Starting...");
+
+    // 初始化SPIFFS（用于存储中文字体）
+    if (!SPIFFS.begin(true)) {
+        Serial.println("[SPIFFS] Mount failed!");
+    } else {
+        Serial.printf("[SPIFFS] OK, total=%dKB used=%dKB\n",
+                      SPIFFS.totalBytes()/1024, SPIFFS.usedBytes()/1024);
+    }
 
     // 初始化设置
+    Serial.println("[2] Settings init...");
     settings_init();
+    Serial.println("[3] Settings loaded");
     const Settings *cfg = settings_get();
+    Serial.printf("[4] Config: vol=%d bt=%d\n", cfg->volume, cfg->bt_enabled);
 
     // 初始化屏幕背光
     pinMode(PIN_LCD_BL, OUTPUT);
     digitalWrite(PIN_LCD_BL, LOW);
 
     // 初始化TFT
-    tft.init();
-    tft.setRotation(0);
-    tft.writecommand(0x36);
-    tft.writedata(0x08);  // BGR
-    tft.fillScreen(TFT_BLACK);
-    analogWrite(PIN_LCD_BL, cfg->screen_brightness);
+    static TFT_eSPI tft_instance;
+    tft_ptr = &tft_instance;
+    tft_ptr->init();
+    tft_ptr->setRotation(0);
+    tft_ptr->writecommand(0x36);
+    tft_ptr->writedata(0x08);  // BGR
+    tft_ptr->fillScreen(TFT_BLACK);
+    digitalWrite(PIN_LCD_BL, HIGH);  // ESP32-S3不支持analogWrite，直接开背光
 
     // 初始化LVGL
     lv_init();
     static uint8_t draw_buf[SCREEN_W * 40] __attribute__((aligned(4))); // 减小buffer
     lv_display_t *disp = lv_tft_espi_create(SCREEN_W, SCREEN_H,
                                              draw_buf, sizeof(draw_buf));
+    if (!disp) {
+        Serial.println("[FATAL] LVGL display create failed!");
+        digitalWrite(PIN_LCD_BL, HIGH);
+        tft_ptr->fillScreen(TFT_RED);
+        while(1) delay(1000);
+    }
     lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_0);
 
     // 创建keypad输入设备
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(indev, input_lvgl_read_cb);
+    
+    // 绑定keypad到default group（关键！否则按键无法导航焦点）
+    lv_group_t *group = lv_group_get_default();
+    if (!group) {
+        group = lv_group_create();
+        lv_group_set_default(group);
+    }
+    lv_indev_set_group(indev, group);
 
     // 主题
     lv_theme_t *th = lv_theme_default_init(disp,
@@ -369,6 +388,8 @@ void setup() {
     // 连接WiFi
     if (strlen(cfg->wifi_ssid) > 0) {
         connect_wifi(cfg->wifi_ssid, cfg->wifi_pass);
+    } else {
+        ui_set_wifi_status(false);
     }
 
     // 启动画面
@@ -383,6 +404,14 @@ void setup() {
 //  LOOP
 // =====================================================================
 void loop() {
+    // LVGL tick (v9需要手动调用)
+    static uint32_t last_tick = 0;
+    uint32_t now = millis();
+    if (now != last_tick) {
+        lv_tick_inc(now - last_tick);
+        last_tick = now;
+    }
+
     // 更新输入
     input_update();
 

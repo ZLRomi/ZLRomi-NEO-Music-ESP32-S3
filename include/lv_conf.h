@@ -125,6 +125,21 @@
 #endif
 
 /*==================
+ * TINY TTF (完整中文字体支持)
+ *==================*/
+#define LV_USE_TINY_TTF 1
+#if LV_USE_TINY_TTF
+    #define LV_TINY_TTF_CACHE_GLYPH_CNT 256
+#endif
+
+/*==================
+ * FS (用于从Flash读取字体文件)
+ *==================*/
+#define LV_USE_FS_STDIO 0
+#define LV_USE_FS_POSIX 0
+#define LV_USE_FS_MEMFS 1
+
+/*==================
  * DISPLAY DRIVERS
  *==================*/
 #define LV_USE_ST7789 1

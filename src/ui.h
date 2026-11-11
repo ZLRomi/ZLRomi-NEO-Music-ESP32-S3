@@ -20,6 +20,9 @@ void ui_update_song(const SongInfo* song);
 void ui_update_lyrics(const LyricsData* lyrics, int current_line);
 void ui_show_toast(const char* msg);
 
+// WiFi状态
+void ui_set_wifi_status(bool connected);
+
 // 搜索相关
 lv_obj_t* ui_get_search_textarea();
 const char* ui_get_search_keyword();
