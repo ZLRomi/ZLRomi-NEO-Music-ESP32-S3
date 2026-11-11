@@ -53,24 +53,24 @@ jobs:
         # 下载 Noto Sans SC
         curl -L -o /tmp/NotoSansSC-Regular.otf \
           "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
-        # 生成14px中文位图字体 (GB2312一级汉字+ASCII+符号)
+        # 生成14px中文位图字体 (仅常用汉字3000个+ASCII+标点)
         lv_font_conv \
           --font /tmp/NotoSansSC-Regular.otf \
           --size 14 \
-          --bpp 4 \
+          --bpp 2 \
           --format lvgl \
           --output data/cn_font_14.bin \
           --symbols "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()_+-=[]{}|;':\",./<>?~·。，、；：！？""''（）【】《》…" \
-          --range 0x4E00-0x9FFF,0x3000-0x303F,0xFF00-0xFFEF
+          --range 0x4E00-0x6FFF,0x3000-0x303F,0xFF00-0xFFEF
         # 生成16px中文位图字体
         lv_font_conv \
           --font /tmp/NotoSansSC-Regular.otf \
           --size 16 \
-          --bpp 4 \
+          --bpp 2 \
           --format lvgl \
           --output data/cn_font_16.bin \
           --symbols "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()_+-=[]{}|;':\",./<>?~·。，、；：！？""''（）【】《》…" \
-          --range 0x4E00-0x9FFF,0x3000-0x303F,0xFF00-0xFFEF
+          --range 0x4E00-0x6FFF,0x3000-0x303F,0xFF00-0xFFEF
         ls -lh data/
         
     - name: Build firmware
