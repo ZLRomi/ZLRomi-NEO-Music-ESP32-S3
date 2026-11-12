@@ -198,6 +198,20 @@ static void create_search_page() {
     lv_obj_align(s_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(s_kb, s_ta_search);
 
+#if LV_USE_IME_PINYIN
+    // Pinyin IME for Chinese input
+    static lv_obj_t *ime = NULL;
+    ime = lv_ime_pinyin_create(scr);
+    lv_obj_set_style_text_font(ime, cn_font(16), 0);
+    lv_ime_pinyin_set_keyboard(ime, s_kb);
+    // Candidate panel above keyboard
+    lv_obj_t *cand = lv_ime_pinyin_get_cand_panel(ime);
+    lv_obj_set_size(cand, LV_PCT(100), 28);
+    lv_obj_align_to(cand, s_kb, LV_ALIGN_OUT_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(cand, C_SURFACE2, 0);
+    lv_obj_set_style_text_color(cand, C_TEXT, 0);
+#endif
+
     // Search results
     s_search_results = lv_list_create(scr);
     lv_obj_set_size(s_search_results, 220, 80);
