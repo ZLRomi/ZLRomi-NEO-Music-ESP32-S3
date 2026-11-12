@@ -54,9 +54,6 @@ static SongInfo g_current_song;
 static PlayUrlInfo g_play_url;
 static LyricsData g_lyrics;
 
-// Extern from ui.cpp for search textarea access
-extern lv_obj_t *s_ta_search;
-
 // =====================================================================
 //  LVGL Display Flush (v9 API)
 // =====================================================================
@@ -225,7 +222,7 @@ static void handle_buttons() {
                         }
                     } else if (page == PAGE_SEARCH) {
                         // Execute search
-                        const char* kw = lv_textarea_get_text(s_ta_search);
+                        const char* kw = ui_get_search_text();
                         if (kw && strlen(kw) > 0 && WiFi.status() == WL_CONNECTED) {
                             Serial.printf("[Search] keyword: %s\n", kw);
                             g_search_count = api_search(kw, g_search_results, 20);

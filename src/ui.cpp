@@ -577,3 +577,7 @@ int ui_focus_get(void) { return s_focus_idx; }
 void ui_update_recommend_list(void) { /* TODO: populate from API */ }
 void ui_update_search_results(void) { /* TODO: populate from API */ }
 void ui_update_playlist(void) { /* TODO: populate from API */ }
+
+const char* ui_get_search_text(void) {
+    return s_ta_search ? lv_textarea_get_text(s_ta_search) : "";
+}

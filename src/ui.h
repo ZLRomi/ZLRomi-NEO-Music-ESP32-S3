@@ -40,3 +40,6 @@ void ui_set_wifi_status(bool connected);
 // 焦点管理
 void ui_focus_move(int delta);
 int ui_focus_get(void);
+
+// 获取搜索框文本
+const char* ui_get_search_text(void);
