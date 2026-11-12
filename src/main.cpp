@@ -372,8 +372,8 @@ static void on_audio_error(const char* msg) {
 //  SETUP
 // =====================================================================
 void setup() {
-    // UART0 on GPIO43(TX)/GPIO44(RX) for debug (USB OTG used for MSC)
-    Serial.begin(115200, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);
+    // USB-CDC serial for debug (USB OTG shared with CDC+MSC)
+    Serial.begin(115200);
     delay(500);
     Serial.println("\n=== ZLRomi NEO Music Player ===");
     Serial.println("[1] Starting...");
