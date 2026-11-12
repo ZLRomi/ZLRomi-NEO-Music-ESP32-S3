@@ -3,10 +3,10 @@
  *
  * 组成：
  *   1. AP 配网 + 局域网音乐库网页（web_ui / wifi_prov / music_api）
- *   2. 1.3 寸 ST7789 彩屏 + 4 键界面（tft_display / keys / ui / settings）
+ *   2. 240x320 ST7789 彩屏 + 7 键界面（tft_display / keys / ui / settings）
  *   3. SD 卡本地 MP3 + PCM5102A 输出（sd_card / audio_player）
  *
- * 主循环只有两件事：每 20ms 调 ui_tick()，其余全在各自任务里。
+ * 主循环每 10ms 调一次 ui_tick()，其余全在各自任务里。
  */
 
 #include <stdbool.h>
@@ -52,7 +52,7 @@ void app_main(void)
        断开与自动连接会互相覆盖，导致开关失效。 */
     wifi_prov_set_online_flag(g_set.online != 0);
 
-    /* 屏幕需在 WiFi 之前初始化：整帧缓冲占用 115KB 内部 RAM，
+    /* 屏幕需在 WiFi 之前初始化：整帧缓冲占用 150KB 内部 RAM，
        WiFi 启动后这部分内存将无法分配。 */
     bool have_tft = (tft_init() == ESP_OK);
     if (!have_tft) {
@@ -80,7 +80,7 @@ void app_main(void)
     ESP_LOGI(TAG, "──────────────── 怎么用 ────────────────");
     ESP_LOGI(TAG, "  手机 Wi-Fi 列表里找: %s", wifi_prov_ap_ssid());
     ESP_LOGI(TAG, "  连上后浏览器打开: http://192.168.4.1");
-    ESP_LOGI(TAG, "  屏幕按键: ^上 v下 #井 *星");
+    ESP_LOGI(TAG, "  屏幕按键: 上下左右移动 / OK 确认 / SET 设置 / RST 长按重启");
     ESP_LOGI(TAG, "────────────────────────────────────────");
 
     while (true) {

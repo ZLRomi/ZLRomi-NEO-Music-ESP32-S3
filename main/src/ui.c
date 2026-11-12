@@ -30,6 +30,8 @@ static const char *TAG = "ui";
 
 #define C565(r, g, b)  ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 
+/* UI 布局沿用参考工程 240x240 的坐标系；物理屏是 240x320（见 tft_display.h），
+   下方 80px 暂为留白。要铺满需重排所有 y 坐标，需实机确认后再动。 */
 #define SCREEN_W  240
 #define SCREEN_H  240
 

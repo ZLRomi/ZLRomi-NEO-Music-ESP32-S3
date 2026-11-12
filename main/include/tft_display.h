@@ -92,8 +92,8 @@ int tft_text_width(const char *s);
  * @brief 切换屏幕方向（调试用）
  * @param mode 0~3，对应 mirror(x,y) 的四种组合：00 / 10 / 01 / 11
  *
- * swap_xy 已经固定为 true（四色块位置验证过），这里只调 mirror。
- * 找到文字方向正确的那一种后，把编号写死在 tft_init() 里。
+ * swap_xy 由 tft_set_rotation() 按保存的方向统一管理，这里只调 mirror。
+ * 找到文字方向正确的那一种后，把编号写进 NVS 由 ui_init() 应用。
  */
 void tft_set_orientation(int mode);
 
