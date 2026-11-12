@@ -14,8 +14,12 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "usb/usb_host.h"
+
+// Include local MSC host headers (in same directory)
+extern "C" {
 #include "msc_host.h"
 #include "msc_host_vfs.h"
+}
 
 static const char *TAG = "USB_HOST";
 
@@ -88,8 +92,8 @@ static void usb_host_task(void *arg)
 
         // Mount FAT filesystem at /usb via VFS
         const esp_vfs_fat_mount_config_t mount_config = {
-            .max_files = 8,
             .format_if_mount_failed = false,
+            .max_files = 8,
             .allocation_unit_size = info.sector_size,
         };
         msc_host_vfs_handle_t vfs_handle;
