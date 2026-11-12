@@ -1,157 +1,55 @@
+/**
+ * @file wifiuser.cpp
+ * @brief WiFi connection management
+ */
 #include "wifiuser.h"
-#include "lvgl.h"
 #include "ui.h"
 #include "data.h"
 #include <WiFi.h>
 
-void WiFi_update() 
-{    
-    if(Set.WiFi_connect_flag)
-    {
+void WiFi_update()
+{
+    if (Set.WiFi_connect_flag) {
         WiFi_connect();
-        Set.WiFi_connect_flag = 0;
-    }
-    else
-    {
-        // 修复加载的组件在连接完成后会残留文件问题
-        if(!lv_obj_has_flag(ui_SpinnerWiFi, LV_OBJ_FLAG_HIDDEN))
-        {
-            lv_obj_add_flag(ui_SpinnerWiFi, LV_OBJ_FLAG_HIDDEN);
-        }
-        lv_obj_invalidate(ui_SpinnerWiFi);
-        lv_obj_invalidate(lv_obj_get_parent(ui_SpinnerWiFi));
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
-    
-    if(Set.WiFi_connect_stauts || WiFi.status() == WL_CONNECTED)
-    {
-        // 修复连接状态中文显示乱码问题
-        lv_label_set_text_fmt(ui_LabelWiFiState, "已连接 %s", WiFi.SSID().c_str());
-        lv_obj_add_state(ui_SwitchWiFi, LV_STATE_CHECKED);
-        lv_textarea_set_text(ui_TextAreaXiaozhiQuestion, "你能做什么？");
-        lv_textarea_set_text(ui_TextAreaXiaoZhiAnswer,
-                         "我可以回答各种问题，提供建议，帮助解决问题，生成代码示例，进行翻译，进行文本分析，以及执行各种其他任务。无论是关于编程、学术、日常生活还是其他领域的问题，我都会尽力提供帮助和支持。");
-        lv_obj_clear_state(ui_SwitchXiaoZhiSpeak, LV_STATE_DISABLED);
-    }
-    else
-    {
-        lv_label_set_text(ui_LabelWiFiState,"未连接");
-        if(lv_obj_has_state(ui_SwitchWiFi, LV_STATE_CHECKED))
-        {
-            lv_obj_clear_state(ui_SwitchWiFi, LV_STATE_CHECKED);
-        }
-        lv_textarea_set_text(ui_TextAreaXiaozhiQuestion, "请连接WiFi后使用小智功能哦~");
-        lv_textarea_set_text(ui_TextAreaXiaoZhiAnswer, "请连接WiFi后使用小智功能哦~");
-        lv_obj_add_state(ui_SwitchXiaoZhiSpeak, LV_STATE_DISABLED);
+        Set.WiFi_connect_flag = false;
     }
 
-    if(Set.WiFi_button_flag == 1)
-    {
-        lv_roller_set_options(ui_RollerWiFi, "正在扫描附近WiFi...\n", LV_ROLLER_MODE_NORMAL);
-        WiFi_scan();
-        Set.WiFi_button_flag = 0;
-    }
-    else
-    {
-        lv_roller_set_options(ui_RollerWiFi, Set.WiFi_scan_all.c_str(), LV_ROLLER_MODE_NORMAL);
-    }
-}
-
-void WiFi_scan()
-{
-    int n = WiFi.scanNetworks();
-    if (n == 0) 
-    {
-        Set.WiFi_scan_all = "附近无可用WiFi\n";
-    } 
-    else
-    {
-        for (int i = 0; i < n; ++i)
-        {
-            Set.WiFi_scan_one = WiFi.SSID(i) + "\n";
-            Set.WiFi_scan_all += Set.WiFi_scan_one;
-        }
-        // 修复WiFi列表第一项没有读取到的问题
-        strcpy(Set.WiFi_name, WiFi.SSID(0).c_str());
-    }
-    if(!Set.WiFi_connect_stauts)WiFi_init(); 
-}
-
-void WiFi_connect()
-{
-    WiFi.begin(Set.WiFi_name, Set.WiFi_password);
-    for(int i = 0; i < Set.WiFi_connect_timeout; ++i)
-    {
-        uint32_t connect_status = WiFi.status();
-        // Serial.println(connect_status);
-        if(connect_status == WL_CONNECTED)
-        {
-        	// Serial.println("success");
-        	Set.WiFi_connect_stauts = 1;
-        	break;
-        }
-        else Set.WiFi_connect_stauts = 0;
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    if(Set.WiFi_connect_stauts)
-    {
-        if(!Data.time_flag){time_get();Data.time_flag = 1;}
-        if(!Data.weather_flag)Data.weather_flag = 1;
-
-        lv_obj_add_state(ui_SwitchWiFi, LV_STATE_CHECKED);
-        lv_textarea_set_text(ui_TextAreaXiaozhiQuestion, "你能做什么？");
-        lv_textarea_set_text(ui_TextAreaXiaoZhiAnswer,
-                         "我可以回答各种问题，提供建议，帮助解决问题，生成代码示例，进行翻译，进行文本分析，以及执行各种其他任务。无论是关于编程、学术、日常生活还是其他领域的问题，我都会尽力提供帮助和支持。");
-        lv_obj_clear_state(ui_SwitchXiaoZhiSpeak, LV_STATE_DISABLED);
-    }
-    else
-    {
-        if(lv_obj_has_state(ui_SwitchWiFi, LV_STATE_CHECKED))
-        {
-            lv_obj_clear_state(ui_SwitchWiFi, LV_STATE_CHECKED);
-        }
-        lv_textarea_set_text(ui_TextAreaXiaozhiQuestion, "请连接WiFi后使用小智功能哦~");
-        lv_textarea_set_text(ui_TextAreaXiaoZhiAnswer, "请连接WiFi后使用小智功能哦~");
-        lv_obj_add_state(ui_SwitchXiaoZhiSpeak, LV_STATE_DISABLED);
+    if (Set.WiFi_connect_stauts || WiFi.status() == WL_CONNECTED) {
+        Set.WiFi_connect_stauts = true;
+        ui_set_wifi_status(true);
+    } else {
+        ui_set_wifi_status(false);
     }
 }
 
 void WiFi_init()
 {
     WiFi.mode(WIFI_STA);
-    WiFi.begin();
-    for(int i = 0; i < Set.WiFi_connect_timeout; ++i)
-    {
-        uint32_t connect_status = WiFi.status();
-        // Serial.println(connect_status);
-        if(connect_status == WL_CONNECTED)
-        {
-        	// Serial.println("success");
-        	Set.WiFi_connect_stauts = 1;
-        	break;
-        }
-        else Set.WiFi_connect_stauts = 0;
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    if(Set.WiFi_connect_stauts)
-    {
-        if(!Data.time_flag){time_get();Data.time_flag = 1;}
-        if(!Data.weather_flag)Data.weather_flag = 1;
+    WiFi.disconnect();
+    Serial.println("[WiFi] Initialized");
+}
 
-        lv_obj_add_state(ui_SwitchWiFi, LV_STATE_CHECKED);
-        lv_textarea_set_text(ui_TextAreaXiaozhiQuestion, "你能做什么？");
-        lv_textarea_set_text(ui_TextAreaXiaoZhiAnswer,
-                         "我可以回答各种问题，提供建议，帮助解决问题，生成代码示例，进行翻译，进行文本分析，以及执行各种其他任务。无论是关于编程、学术、日常生活还是其他领域的问题，我都会尽力提供帮助和支持。");
-        lv_obj_clear_state(ui_SwitchXiaoZhiSpeak, LV_STATE_DISABLED);
+void WiFi_connect()
+{
+    Serial.printf("[WiFi] Connecting to %s...\n", Set.WiFi_name);
+    WiFi.begin(Set.WiFi_name, Set.WiFi_password);
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        attempts++;
     }
-    else
-    {
-        if(lv_obj_has_state(ui_SwitchWiFi, LV_STATE_CHECKED))
-        {
-            lv_obj_clear_state(ui_SwitchWiFi, LV_STATE_CHECKED);
-        }
-        lv_textarea_set_text(ui_TextAreaXiaozhiQuestion, "请连接WiFi后使用小智功能哦~");
-        lv_textarea_set_text(ui_TextAreaXiaoZhiAnswer, "请连接WiFi后使用小智功能哦~");
-        lv_obj_add_state(ui_SwitchXiaoZhiSpeak, LV_STATE_DISABLED);
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Set.WiFi_connect_stauts = true;
+        Serial.printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        ui_set_wifi_status(true);
+        ui_show_toast("WiFi\xe5\xb7\xb2\xe8\xbf\x9e\xe6\x8e\xa5");
+        time_get();
+    } else {
+        Set.WiFi_connect_stauts = false;
+        Serial.println("[WiFi] Connection failed");
+        ui_set_wifi_status(false);
+        ui_show_toast("WiFi\xe8\xbf\x9e\xe6\x8e\xa5\xe5\xa4\xb1\xe8\xb4\xa5");
     }
 }
