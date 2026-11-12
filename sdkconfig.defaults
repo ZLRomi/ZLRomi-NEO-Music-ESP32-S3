@@ -1,7 +1,10 @@
 # NEO Music —— HW-678 / ESP32-S3 N16R8 默认配置
 
-# 串口：板子是 CH343 USB-CDC，不是原生 USB-Serial-JTAG
-CONFIG_ESP_CONSOLE_USB_CDC=y
+# 串口：COM11 是 CH343 USB-UART 桥，接的是 UART0(GPIO43/44)。
+# 原生 USB 的 D+/D-(GPIO19/20) 已接 U 盘做 Host，不能再当 CDC console，
+# 两边抢同一个 USB 外设会造成启动循环，且 COM11 上看不到任何 app 日志。
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
 # 16MB Flash + 自定义分区表
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
