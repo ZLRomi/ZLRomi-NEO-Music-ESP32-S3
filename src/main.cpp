@@ -384,6 +384,15 @@ void setup() {
     } else {
         Serial.printf("[LittleFS] OK, total=%dKB used=%dKB\n",
                       LittleFS.totalBytes()/1024, LittleFS.usedBytes()/1024);
+        // List files
+        File root = LittleFS.open("/");
+        if (root && root.isDirectory()) {
+            File file = root.openNextFile();
+            while (file) {
+                Serial.printf("[LittleFS]   %s (%d bytes)\n", file.name(), file.size());
+                file = root.openNextFile();
+            }
+        }
     }
 
     // 初始化USB Host MSC（U盘读取字体文件）
