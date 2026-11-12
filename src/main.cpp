@@ -19,6 +19,7 @@
 #include "sduser.h"
 #include "music.h"
 #include "task.h"
+#include "bt_a2dp.h"
 
 // =====================================================================
 //  Hardware Pins (HW-678)
@@ -160,6 +161,7 @@ void setup()
     // Init subsystems
     SD_init();
     music_init();
+    bt_a2dp_init();
     ui_init();
     task_init();
     WiFi_init();
