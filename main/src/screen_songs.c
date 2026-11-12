@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "cover.h"
+#include "esp_attr.h"
 #include "gfx.h"
 #include "music_state.h"
 #include "netease.h"
@@ -24,7 +25,7 @@
 
 static focus_t s_focus;
 static int     s_top;
-static cover_t s_covers[VISIBLE];
+static EXT_RAM_BSS_ATTR cover_t s_covers[VISIBLE];
 static int64_t s_cover_ids[VISIBLE];
 static bool    s_cover_ok[VISIBLE];
 

@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "cover.h"
+#include "esp_attr.h"
 #include "gfx.h"
 #include "music_state.h"
 #include "netease.h"
@@ -25,7 +26,7 @@
 #define CARD_DY  92
 
 static focus_t s_focus;
-static cover_t s_covers[4];
+static EXT_RAM_BSS_ATTR cover_t s_covers[4];
 static bool    s_cover_loaded;
 
 static void home_enter(void *arg)

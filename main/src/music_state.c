@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "player.h"
@@ -11,7 +12,7 @@
 
 static const char *TAG = "music";
 
-music_state_t g_music;
+EXT_RAM_BSS_ATTR music_state_t g_music;
 
 void music_state_init(void)
 {

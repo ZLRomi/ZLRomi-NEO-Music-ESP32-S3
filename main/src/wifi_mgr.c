@@ -15,6 +15,15 @@
 
 static const char *TAG = "wifi";
 
+/* 网络初始化失败只记日志并返回，不 abort，避免整机无限重启 */
+#define TRY(expr) do {                                                  \
+    esp_err_t e_ = (expr);                                              \
+    if (e_ != ESP_OK) {                                                 \
+        ESP_LOGE(TAG, "%s 失败: %s", #expr, esp_err_to_name(e_));      \
+        return;                                                         \
+    }                                                                   \
+} while (0)
+
 static wifi_state_t s_state = WIFI_OFF;
 static int          s_rssi = 0;
 static int          s_retry = 0;
@@ -135,9 +144,9 @@ static void start_config_ap(void)
     cfg.ap.channel = 1;
     cfg.ap.max_connection = 2;
     cfg.ap.authmode = WIFI_AUTH_OPEN;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    TRY(esp_wifi_set_mode(WIFI_MODE_AP));
+    TRY(esp_wifi_set_config(WIFI_IF_AP, &cfg));
+    TRY(esp_wifi_start());
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.server_port = 80;
@@ -155,15 +164,15 @@ static void start_config_ap(void)
 void wifi_mgr_connect(const char *ssid, const char *pass)
 {
     if (!s_started) return;
-    ESP_ERROR_CHECK(esp_wifi_stop());
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    TRY(esp_wifi_stop());
+    TRY(esp_wifi_set_mode(WIFI_MODE_STA));
     wifi_config_t cfg = { 0 };
     strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
     strncpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password) - 1);
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    TRY(esp_wifi_set_config(WIFI_IF_STA, &cfg));
+    TRY(esp_wifi_start());
     s_state = WIFI_CONNECTING;
     s_retry = 0;
     ESP_LOGI(TAG, "正在连接 %s", ssid);
@@ -175,15 +184,15 @@ void wifi_mgr_init(void)
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "NEO-Music-%02X%02X", mac[4], mac[5]);
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    TRY(esp_netif_init());
+    TRY(esp_event_loop_create_default());
     esp_event_handler_instance_t h1, h2;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+    TRY(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                         &on_wifi_event, NULL, &h1));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+    TRY(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                         &on_wifi_event, NULL, &h2));
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&ic));
+    TRY(esp_wifi_init(&ic));
     s_started = true;
 
     if (g_cfg.wifi_ssid[0]) {

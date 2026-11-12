@@ -236,9 +236,13 @@ static void audio_task(void *arg)
 void player_init(void)
 {
     i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
-    chan.dma_desc_num = 6;
-    chan.dma_frame_num = 256;
-    ESP_ERROR_CHECK(i2s_new_channel(&chan, &s_tx, NULL));
+    chan.dma_desc_num = 4;
+    chan.dma_frame_num = 240;
+    esp_err_t err = i2s_new_channel(&chan, &s_tx, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "创建 I2S 通道失败: %s（音频不可用，界面继续）", esp_err_to_name(err));
+        return;
+    }
 
     i2s_std_config_t std = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
@@ -252,8 +256,16 @@ void player_init(void)
             .din  = I2S_GPIO_UNUSED,
         },
     };
-    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_tx, &std));
-    ESP_ERROR_CHECK(i2s_channel_enable(s_tx));
+    err = i2s_channel_init_std_mode(s_tx, &std);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "配置 I2S 失败: %s（音频不可用，界面继续）", esp_err_to_name(err));
+        return;
+    }
+    err = i2s_channel_enable(s_tx);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "启用 I2S 失败: %s（音频不可用，界面继续）", esp_err_to_name(err));
+        return;
+    }
 
     s_q = xQueueCreate(6, sizeof(cmd_t));
     if (!s_q) {

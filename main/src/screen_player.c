@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "gfx.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 #include "music_state.h"
 #include "player.h"
@@ -29,7 +30,7 @@ typedef struct {
 } lrc_line_t;
 
 static focus_t    s_focus;
-static uint16_t   s_disc[DISC_SIZE * DISC_SIZE];
+static EXT_RAM_BSS_ATTR uint16_t s_disc[DISC_SIZE * DISC_SIZE];
 static int        s_angle;
 static int64_t    s_last_spin;
 static lrc_line_t s_lines[64];

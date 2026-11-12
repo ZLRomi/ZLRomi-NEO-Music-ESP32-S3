@@ -4,6 +4,7 @@
 
 #include "board.h"
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
@@ -19,10 +20,23 @@
 
 static const char *TAG = "gfx";
 
+/* 初始化里任何一步失败只记日志并返回，绝不 abort：
+   一处外设没起来不该让整机陷入无限重启，UI 与按键仍要能用。 */
+#define TRY(expr) do {                                                  \
+    esp_err_t e_ = (expr);                                              \
+    if (e_ != ESP_OK) {                                                 \
+        ESP_LOGE(TAG, "%s 失败: %s", #expr, esp_err_to_name(e_));      \
+        return;                                                         \
+    }                                                                   \
+} while (0)
+
+#define FLUSH_ROWS  20      /* 每次 DMA 送 20 行，中转缓冲 320*20*2 = 12.5KB 内部 RAM */
+
 static esp_lcd_panel_handle_t s_panel;
 static SemaphoreHandle_t      s_flush_done;
-static uint16_t              *s_fb;
-static uint16_t               s_line[GFX_W * FONT_H];
+static uint16_t              *s_fb;         /* PSRAM 里的整帧缓冲 */
+static uint16_t              *s_dma;        /* 内部 RAM 的刷屏中转 */
+static EXT_RAM_BSS_ATTR uint16_t s_line[GFX_W * FONT_H];
 static int                    s_dirty_y0 = GFX_H;
 static int                    s_dirty_y1 = 0;
 static int                    s_offset_y;
@@ -73,22 +87,26 @@ void gfx_init(void)
         .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_8_BIT,
         .timer_num = LEDC_TIMER_0, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK,
     };
-    ESP_ERROR_CHECK(ledc_timer_config(&timer));
+    TRY(ledc_timer_config(&timer));
     ledc_channel_config_t ch = {
         .gpio_num = LCD_BL, .speed_mode = LEDC_LOW_SPEED_MODE,
         .channel = LEDC_CHANNEL_0, .timer_sel = LEDC_TIMER_0,
         .duty = 0, .hpoint = 0,
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&ch));
+    TRY(ledc_channel_config(&ch));
 
     s_flush_done = xSemaphoreCreateBinary();
     if (s_flush_done) xSemaphoreGive(s_flush_done);
 
-    /* 整帧 320*240*2 = 150KB，SPI DMA 只能访问内部 RAM */
+    /* 整帧 320*240*2 = 150KB 放 PSRAM：启动时内部堆只有约 137KB，
+       装不下这 150KB，还会把 WiFi / I2S 的 DMA 缓冲挤到 ESP_ERR_NO_MEM。
+       SPI DMA 不能直接读 PSRAM，刷屏时由 s_dma 分块中转。 */
     s_fb = heap_caps_malloc((size_t)GFX_W * GFX_H * sizeof(uint16_t),
-                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!s_fb) {
-        ESP_LOGE(TAG, "整帧缓冲分配失败（需要 150KB 内部 RAM）");
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_dma = heap_caps_malloc((size_t)GFX_W * FLUSH_ROWS * sizeof(uint16_t),
+                             MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!s_fb || !s_dma) {
+        ESP_LOGE(TAG, "帧缓冲分配失败（PSRAM 150KB + 内部 DMA 12.5KB）");
         return;
     }
     memset(s_fb, 0, (size_t)GFX_W * GFX_H * sizeof(uint16_t));
@@ -98,7 +116,7 @@ void gfx_init(void)
         .quadwp_io_num = -1, .quadhd_io_num = -1,
         .max_transfer_sz = GFX_W * GFX_H * sizeof(uint16_t),
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO));
+    TRY(spi_bus_initialize(LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO));
 
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .dc_gpio_num = LCD_DC,
@@ -109,7 +127,7 @@ void gfx_init(void)
         .on_color_trans_done = on_color_done, .user_ctx = NULL,
     };
     esp_lcd_panel_io_handle_t io = NULL;
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST,
+    TRY(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST,
                                             &io_cfg, &io));
 
     esp_lcd_panel_dev_config_t panel_cfg = {
@@ -117,11 +135,11 @@ void gfx_init(void)
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,   /* MADCTL BGR 位，红蓝不反 */
         .bits_per_pixel = 16,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io, &panel_cfg, &s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, true));
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
+    TRY(esp_lcd_new_panel_st7789(io, &panel_cfg, &s_panel));
+    TRY(esp_lcd_panel_reset(s_panel));
+    TRY(esp_lcd_panel_init(s_panel));
+    TRY(esp_lcd_panel_invert_color(s_panel, true));
+    TRY(esp_lcd_panel_disp_on_off(s_panel, true));
 
     /* 整机横屏：默认方向 0 就是横屏，MV 位由 gfx_set_rotation 打开 */
     gfx_set_rotation(0);
@@ -134,19 +152,20 @@ void gfx_init(void)
 
 void gfx_flush(void)
 {
-    if (!s_panel || !s_fb || s_dirty_y0 >= s_dirty_y1) {
+    if (!s_panel || !s_fb || !s_dma || s_dirty_y0 >= s_dirty_y1) {
         return;
     }
     int y0 = s_dirty_y0, y1 = s_dirty_y1;
     s_dirty_y0 = GFX_H;
     s_dirty_y1 = 0;
 
-    const int BLOCK = 120;
-    for (int y = y0; y < y1; y += BLOCK) {
-        int rows = (y + BLOCK <= y1) ? BLOCK : (y1 - y);
+    /* 每块先等上一笔 DMA 完成，再把 PSRAM 里的像素拷进内部中转缓冲 */
+    for (int y = y0; y < y1; y += FLUSH_ROWS) {
+        int rows = (y + FLUSH_ROWS <= y1) ? FLUSH_ROWS : (y1 - y);
         wait_flush();
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, GFX_W, y + rows,
-                                  &s_fb[(size_t)y * GFX_W]);
+        memcpy(s_dma, &s_fb[(size_t)y * GFX_W],
+               (size_t)GFX_W * rows * sizeof(uint16_t));
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, GFX_W, y + rows, s_dma);
     }
 }
 
@@ -196,7 +215,7 @@ void gfx_frame(int x0, int y0, int x1, int y1, uint16_t color)
 
 void gfx_round_rect(int x, int y, int w, int h, int r, uint16_t color)
 {
-    static uint16_t buf[GFX_W * 32];
+    static EXT_RAM_BSS_ATTR uint16_t buf[GFX_W * 32];
     if (!s_fb || w <= 0 || h <= 0) return;
     if (w > GFX_W || h > 32 || r <= 0) {
         gfx_rect(x, y, x + w, y + h, color);

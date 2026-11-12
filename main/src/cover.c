@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -23,7 +24,7 @@ typedef struct {
     cover_t  img;
 } cache_item_t;
 
-static cache_item_t s_cache[CACHE_N];
+static EXT_RAM_BSS_ATTR cache_item_t s_cache[CACHE_N];
 static uint32_t     s_serial;
 
 typedef struct {
