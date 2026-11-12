@@ -2,7 +2,7 @@
 #include <driver/i2s.h>
 #include <Audio.h>
 #include <SD.h>
-#include "ui/src/ui.h"
+#include "ui.h"
 
 #define I2S_DOUT      40
 #define I2S_BCLK      41

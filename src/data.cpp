@@ -1,6 +1,6 @@
 #include "data.h"
 #include "lvgl.h"
-#include "ui/src/ui.h"
+#include "ui.h"
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 

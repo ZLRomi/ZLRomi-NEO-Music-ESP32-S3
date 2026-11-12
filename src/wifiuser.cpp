@@ -1,6 +1,6 @@
 #include "wifiuser.h"
 #include "lvgl.h"
-#include "ui/src/ui.h"
+#include "ui.h"
 #include "data.h"
 #include <WiFi.h>
 
