@@ -127,8 +127,22 @@ static void add_to_focus(lv_obj_t *obj) {
     }
 }
 
-// 获取CJK字体指针
+// =====================================================================
+//  中文字体 (优先USB U盘 -> SPIFFS -> 内置CJK回退)
+// =====================================================================
+static lv_font_t *s_cn_font_14 = nullptr;
+static lv_font_t *s_cn_font_16 = nullptr;
+
+// binfont loader extern (LVGL v9.6 doesn't expose header publicly)
+extern "C" {
+    lv_font_t * lv_binfont_create(const char * path);
+    void lv_binfont_destroy(lv_font_t * font);
+}
+
 static const lv_font_t* get_cn_font(int size) {
+    if (size <= 14 && s_cn_font_14) return s_cn_font_14;
+    if (size >= 16 && s_cn_font_16) return s_cn_font_16;
+    // Fallback to built-in CJK
     if (size <= 14) return &lv_font_source_han_sans_sc_14_cjk;
     return &lv_font_source_han_sans_sc_16_cjk;
 }
@@ -146,7 +160,38 @@ void ui_init() {
     s_focus_group = lv_group_create();
     lv_group_set_default(s_focus_group);
 
-    Serial.println("[UI] Initialized with CJK fonts");
+    // Try loading Chinese fonts from USB first, then SPIFFS
+    Serial.println("[UI] Loading Chinese fonts...");
+    
+    // Try USB paths first
+    const char* font_paths_14[] = {
+        "A:/cn_font_14.bin",      // SPIFFS via LVGL FS_POSIX
+        "/usb/cn_font_14.bin",    // USB MSC direct path
+        nullptr
+    };
+    const char* font_paths_16[] = {
+        "A:/cn_font_16.bin",
+        "/usb/cn_font_16.bin",
+        nullptr
+    };
+    
+    for (int i = 0; font_paths_14[i]; i++) {
+        s_cn_font_14 = lv_binfont_create(font_paths_14[i]);
+        if (s_cn_font_14) {
+            Serial.printf("[UI] CN font 14 loaded from: %s\n", font_paths_14[i]);
+            break;
+        }
+    }
+    for (int i = 0; font_paths_16[i]; i++) {
+        s_cn_font_16 = lv_binfont_create(font_paths_16[i]);
+        if (s_cn_font_16) {
+            Serial.printf("[UI] CN font 16 loaded from: %s\n", font_paths_16[i]);
+            break;
+        }
+    }
+    
+    if (!s_cn_font_14) Serial.println("[UI] CN font 14: using built-in fallback");
+    if (!s_cn_font_16) Serial.println("[UI] CN font 16: using built-in fallback");
 }
 
 // =====================================================================
