@@ -6,6 +6,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 // Initialize Bluetooth A2DP Source
 // Device will be discoverable as "NEO-Music"

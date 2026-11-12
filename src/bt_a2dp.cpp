@@ -9,10 +9,11 @@
 #include "bt_a2dp.h"
 #include <Arduino.h>
 
-// ESP-IDF BT headers (available in Arduino-ESP32 core)
+// ESP-IDF BT headers
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
+#include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 #include "freertos/FreeRTOS.h"
