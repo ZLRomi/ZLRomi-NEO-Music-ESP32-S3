@@ -147,6 +147,11 @@ static bool settings_event(input_event_t ev)
         adjust(s_focus.index, -1);
         return true;
     }
+    if (ev == EV_OK && s_focus.index == 0) {
+        /* WiFi 行按 OK 直接进扫描界面 */
+        ui_goto(SCR_WIFI, NULL);
+        return true;
+    }
     if (ev == EV_RIGHT || ev == EV_RIGHT_REPEAT || ev == EV_OK) {
         adjust(s_focus.index, 1);
         return true;

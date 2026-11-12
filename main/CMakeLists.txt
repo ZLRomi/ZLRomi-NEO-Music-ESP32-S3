@@ -18,6 +18,7 @@ idf_component_register(
                  "src/screen_player.c"
                  "src/screen_search.c"
                  "src/screen_settings.c"
+                 "src/screen_wifi.c"
                  "src/screen_restart.c"
                  "src/font_data.c"
                  "src/font_index.c"

@@ -22,6 +22,7 @@ typedef enum {
     SCR_PLAYER,
     SCR_SEARCH,
     SCR_SETTINGS,
+    SCR_WIFI,           /* 扫描周围网络 / 输密码 */
     SCR_RESTART,        /* RST 长按 3 秒：二次确认，再长按 3 秒才重启 */
     SCR_COUNT
 } screen_id_t;
@@ -52,6 +53,7 @@ extern const screen_ops_t g_screen_songs;
 extern const screen_ops_t g_screen_player;
 extern const screen_ops_t g_screen_search;
 extern const screen_ops_t g_screen_settings;
+extern const screen_ops_t g_screen_wifi;
 extern const screen_ops_t g_screen_restart;
 
 void ui_init(void);

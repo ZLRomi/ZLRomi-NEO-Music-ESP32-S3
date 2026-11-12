@@ -21,6 +21,7 @@ static const screen_ops_t *s_ops[SCR_COUNT] = {
     [SCR_PLAYER]   = &g_screen_player,
     [SCR_SEARCH]   = &g_screen_search,
     [SCR_SETTINGS] = &g_screen_settings,
+    [SCR_WIFI]      = &g_screen_wifi,
     [SCR_RESTART]  = &g_screen_restart,
 };
 

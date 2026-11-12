@@ -144,7 +144,8 @@ static void start_config_ap(void)
     cfg.ap.channel = 1;
     cfg.ap.max_connection = 2;
     cfg.ap.authmode = WIFI_AUTH_OPEN;
-    TRY(esp_wifi_set_mode(WIFI_MODE_AP));
+    /* APSTA：保持热点的同时还能扫描周围网络，用户可以直接在设备上选 */
+    TRY(esp_wifi_set_mode(WIFI_MODE_APSTA));
     TRY(esp_wifi_set_config(WIFI_IF_AP, &cfg));
     TRY(esp_wifi_start());
 
@@ -199,8 +200,103 @@ void wifi_mgr_init(void)
         esp_netif_create_default_wifi_sta();
         wifi_mgr_connect(g_cfg.wifi_ssid, g_cfg.wifi_pass);
     } else {
+        /* 配网模式：APSTA，热点开着的同时也能扫周围网络，设备上直接选 */
+        esp_netif_create_default_wifi_sta();
         start_config_ap();
     }
+}
+
+int wifi_mgr_scan(wifi_ap_t *aps, int max)
+{
+    if (!aps || max <= 0) {
+        return 0;
+    }
+
+    wifi_scan_config_t sc = {
+        .show_hidden = false,
+        .active = false,
+        .passive = false,
+        .max_active_ms = 300,
+    };
+    esp_wifi_scan_stop();
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
+        ESP_LOGW(TAG, "扫描启动失败");
+        return 0;
+    }
+
+    uint16_t num = 0;
+    if (esp_wifi_scan_get_ap_num(&num) != ESP_OK || num == 0) {
+        return 0;
+    }
+    if (num > (uint16_t)max) {
+        num = (uint16_t)max;
+    }
+
+    esp_wifi_ap_record_t *recs = calloc(num, sizeof(esp_wifi_ap_record_t));
+    if (!recs) {
+        return 0;
+    }
+    if (esp_wifi_scan_get_ap_records(&num, recs) != ESP_OK) {
+        free(recs);
+        return 0;
+    }
+
+    int cnt = 0;
+    for (uint16_t i = 0; i < num && cnt < max; i++) {
+        if (!recs[i].ssid[0]) {
+            continue;
+        }
+        /* 同名 SSID（不同频段）只留信号最强的那个 */
+        bool dup = false;
+        for (int k = 0; k < cnt; k++) {
+            if (strcmp(aps[k].ssid, (const char *)recs[i].ssid) == 0) {
+                dup = true;
+                if (recs[i].rssi > aps[k].rssi) {
+                    aps[k].rssi = recs[i].rssi;
+                }
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        strncpy(aps[cnt].ssid, (const char *)recs[i].ssid, sizeof(aps[cnt].ssid) - 1);
+        aps[cnt].ssid[sizeof(aps[cnt].ssid) - 1] = '\0';
+        aps[cnt].rssi   = recs[i].rssi;
+        aps[cnt].locked = (recs[i].authmode != WIFI_AUTH_OPEN);
+        cnt++;
+    }
+    free(recs);
+
+    /* 强信号排前面 */
+    for (int i = 0; i < cnt - 1; i++) {
+        for (int j = i + 1; j < cnt; j++) {
+            if (aps[j].rssi > aps[i].rssi) {
+                wifi_ap_t t = aps[i];
+                aps[i] = aps[j];
+                aps[j] = t;
+            }
+        }
+    }
+    return cnt;
+}
+
+void wifi_mgr_save(const char *ssid, const char *pass)
+{
+    if (!ssid) return;
+    strncpy(g_cfg.wifi_ssid, ssid, sizeof(g_cfg.wifi_ssid) - 1);
+    g_cfg.wifi_ssid[sizeof(g_cfg.wifi_ssid) - 1] = '\0';
+    strncpy(g_cfg.wifi_pass, pass ? pass : "", sizeof(g_cfg.wifi_pass) - 1);
+    g_cfg.wifi_pass[sizeof(g_cfg.wifi_pass) - 1] = '\0';
+    settings_save();
+    ESP_LOGI(TAG, "已保存网络 %s", g_cfg.wifi_ssid);
+}
+
+void wifi_mgr_forget(void)
+{
+    g_cfg.wifi_ssid[0] = '\0';
+    g_cfg.wifi_pass[0] = '\0';
+    settings_save();
 }
 
 wifi_state_t wifi_mgr_state(void)

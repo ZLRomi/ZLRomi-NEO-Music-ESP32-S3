@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+#include "gfx.h"
+#include "theme.h"
+
 /* 内嵌常用音节 -> 汉字表，覆盖中文歌名与歌手名里的高频字。
    词条按拼音排序，匹配时先精确、再前缀。表可继续扩充，不影响逻辑。 */
 typedef struct {
@@ -176,6 +179,21 @@ static const char *KEY_LABEL[PY_KEYS] = {
     "", "", "", "", "", "", "", "", "搜索", "清除",
 };
 
+/* ASCII 布局：给 WiFi 密码这类纯英数字输入用，第 4 行是数字与符号 */
+static const char *KEY_LABEL_ASCII[PY_KEYS] = {
+    "q","w","e","r","t","y","u","i","o","p",
+    "a","s","d","f","g","h","j","k","l","退格",
+    "z","x","c","v","b","n","m","1","2","3",
+    "4","5","6","7","8","9","0","-","确定","清除",
+};
+
+static kb_mode_t s_mode = KB_PINYIN;
+
+void pinyin_set_mode(kb_mode_t mode)
+{
+    s_mode = mode;
+}
+
 void pinyin_reset(pinyin_t *p)
 {
     if (!p) return;
@@ -220,6 +238,12 @@ void pinyin_update_candidates(pinyin_t *p)
 pinyin_key_t pinyin_key_type(int index)
 {
     if (index < 0 || index >= PY_KEYS) return PK_NONE;
+    if (s_mode == KB_ASCII) {
+        if (index == 19) return PK_BACK;
+        if (index == 38) return PK_OK;
+        if (index == 39) return PK_CLEAR_ALL;
+        return PK_CHAR;
+    }
     /* 字母：0..9 是 q..p，10..18 是 a..l，20..26 是 z..m */
     if (index <= 18 || (index >= 20 && index <= 26)) return PK_LETTER;
     if (index == 19) return PK_BACK;
@@ -238,6 +262,11 @@ void pinyin_key_label(int index, const pinyin_t *p, char *buf, size_t cap)
     if (index < 0 || index >= PY_KEYS) return;
 
     pinyin_key_t t = pinyin_key_type(index);
+    if (s_mode == KB_ASCII) {
+        strncpy(buf, KEY_LABEL_ASCII[index], cap - 1);
+        buf[cap - 1] = ' ';
+        return;
+    }
     if (t == PK_CANDIDATE) {
         int ci = index - 30;
         if (p && ci < p->cand_count && p->cands[ci][0]) {
@@ -313,6 +342,16 @@ void pinyin_activate(pinyin_t *p, int index)
     case PK_CANDIDATE:
         commit_candidate(p, index - 30);
         break;
+    case PK_CHAR: {
+        /* ASCII 模式：按键上的字符直接追加到已输入文本 */
+        char label[16];
+        pinyin_key_label(index, p, label, sizeof(label));
+        if (label[0]) append_utf8(p->text, sizeof(p->text), label);
+        break;
+    }
+    case PK_OK:
+        p->submit = true;
+        break;
     case PK_SEARCH:
         /* 还有拼音没上屏时，先把首选候选补上，避免搜到拼音串 */
         if (p->input[0] && p->cand_count > 0) commit_candidate(p, 0);
@@ -326,4 +365,39 @@ void pinyin_activate(pinyin_t *p, int index)
 const char *pinyin_text(const pinyin_t *p)
 {
     return p ? p->text : "";
+}
+
+/* 键盘格子尺寸：10 列 x 4 行，正好铺满 320 宽的屏幕 */
+#define KB_CELL_W   30
+#define KB_CELL_H   42
+#define KB_CELL_GAP 1
+
+void pinyin_draw_keyboard(const pinyin_t *p, int focus_index, int x0, int y0)
+{
+    for (int i = 0; i < PY_KEYS; i++) {
+        int col = i % PY_COLS;
+        int row = i / PY_COLS;
+        int x = x0 + col * (KB_CELL_W + KB_CELL_GAP);
+        int y = y0 + row * (KB_CELL_H + KB_CELL_GAP);
+        bool focused = (i == focus_index);
+
+        uint16_t bg = focused ? g_theme.focus : g_theme.surface;
+        if (pinyin_key_type(i) == PK_CANDIDATE && p->cand_count > 0) {
+            bg = focused ? g_theme.focus : g_theme.surface_hi;
+        }
+        gfx_rect(x, y, x + KB_CELL_W, y + KB_CELL_H, bg);
+        if (focused) {
+            gfx_frame(x, y, x + KB_CELL_W, y + KB_CELL_H, g_theme.focus_edge);
+        }
+
+        char label[16];
+        pinyin_key_label(i, p, label, sizeof(label));
+        if (label[0]) {
+            int tw = gfx_text_width_small(label);
+            int tx = x + (KB_CELL_W - tw) / 2;
+            if (tx < x) tx = x;
+            gfx_text_small(tx, y + (KB_CELL_H - 16) / 2, label,
+                           focused ? g_theme.accent : g_theme.text, bg);
+        }
+    }
 }

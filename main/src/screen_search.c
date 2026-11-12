@@ -17,9 +17,6 @@
 
 #define KB_X0     5
 #define KB_Y0     40
-#define CELL_W    30
-#define CELL_H    42
-#define CELL_GAP  1
 
 static focus_t  s_focus;
 static pinyin_t s_py;
@@ -32,31 +29,6 @@ static void search_enter(void *arg)
     pinyin_reset(&s_py);
 }
 
-static void draw_cell(int index, bool focused)
-{
-    int col = index % PY_COLS;
-    int row = index / PY_COLS;
-    int x = KB_X0 + col * (CELL_W + CELL_GAP);
-    int y = KB_Y0 + row * (CELL_H + CELL_GAP);
-
-    uint16_t bg = focused ? g_theme.focus : g_theme.surface;
-    if (pinyin_key_type(index) == PK_CANDIDATE && s_py.cand_count > 0) {
-        bg = focused ? g_theme.focus : g_theme.surface_hi;
-    }
-    gfx_rect(x, y, x + CELL_W, y + CELL_H, bg);
-    if (focused) gfx_frame(x, y, x + CELL_W, y + CELL_H, g_theme.focus_edge);
-
-    char label[16];
-    pinyin_key_label(index, &s_py, label, sizeof(label));
-    if (label[0]) {
-        int tw = gfx_text_width_small(label);
-        int tx = x + (CELL_W - tw) / 2;
-        if (tx < x) tx = x;
-        gfx_text_small(tx, y + (CELL_H - 16) / 2, label,
-                       focused ? g_theme.accent : g_theme.text, bg);
-    }
-}
-
 static void search_draw(void)
 {
     gfx_fill(g_theme.bg);
@@ -67,9 +39,7 @@ static void search_draw(void)
     gfx_text_small(8, 4, line, g_theme.text, g_theme.bg);
     gfx_hline(8, GFX_W - 8, 26, g_theme.line);
 
-    for (int i = 0; i < PY_KEYS; i++) {
-        draw_cell(i, s_focus.index == i);
-    }
+    pinyin_draw_keyboard(&s_py, s_focus.index, KB_X0, KB_Y0);
     gfx_text_center_small(216, "方向键移动  OK 输入  SET 返回", g_theme.text_dim, g_theme.bg);
 }
 

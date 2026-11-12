@@ -27,7 +27,15 @@ typedef enum {
     PK_SEARCH,
     PK_CANDIDATE,
     PK_CLEAR_INPUT,
+    PK_CHAR,        /* ASCII 模式：直接字符（数字/符号/字母） */
+    PK_OK,          /* ASCII 模式：确定 */
 } pinyin_key_t;
+
+/** 键盘布局：中文拼音 / ASCII（给 WiFi 密码用） */
+typedef enum {
+    KB_PINYIN = 0,
+    KB_ASCII,
+} kb_mode_t;
 
 typedef struct {
     char input[PY_INPUT_MAX];             /* 正在输入的拼音 */
@@ -38,6 +46,8 @@ typedef struct {
 } pinyin_t;
 
 void pinyin_reset(pinyin_t *p);
+/** 切换键盘布局（拼音 / ASCII） */
+void pinyin_set_mode(kb_mode_t mode);
 void pinyin_update_candidates(pinyin_t *p);
 
 /** 第 index 个键格显示什么（候选格内容随输入变化） */
@@ -48,3 +58,11 @@ pinyin_key_t pinyin_key_type(int index);
 void pinyin_activate(pinyin_t *p, int index);
 
 const char *pinyin_text(const pinyin_t *p);
+
+/**
+ * @brief 画出整块键盘（含焦点高亮），搜索页与 WiFi 密码页共用
+ * @param p           键盘状态（决定候选字与标签）
+ * @param focus_index 当前焦点格
+ * @param x0,y0       键盘左上角
+ */
+void pinyin_draw_keyboard(const pinyin_t *p, int focus_index, int x0, int y0);
