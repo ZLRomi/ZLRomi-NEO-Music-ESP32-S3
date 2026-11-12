@@ -125,6 +125,14 @@
 #endif
 
 /*==================
+ * TINY TTF (load OTF/TTF fonts at runtime)
+ *==================*/
+#define LV_USE_TINY_TTF 1
+#if LV_USE_TINY_TTF
+    #define LV_TINY_TTF_CACHE_GLYPH_CNT 256
+#endif
+
+/*==================
  * FILE SYSTEM (for loading fonts from SPIFFS)
  *==================*/
 #define LV_USE_FS_POSIX 1

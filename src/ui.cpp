@@ -128,15 +128,15 @@ static void add_to_focus(lv_obj_t *obj) {
 }
 
 // =====================================================================
-//  中文字体 (优先USB U盘 -> SPIFFS -> 内置CJK回退)
+//  中文字体 (TinyTTF从LittleFS加载OTF)
 // =====================================================================
 static lv_font_t *s_cn_font_14 = nullptr;
 static lv_font_t *s_cn_font_16 = nullptr;
 
-// binfont loader extern (LVGL v9.6 doesn't expose header publicly)
+// TinyTTF extern declarations (LVGL v9.6 doesn't expose header publicly)
 extern "C" {
-    lv_font_t * lv_binfont_create(const char * path);
-    void lv_binfont_destroy(lv_font_t * font);
+    lv_font_t * lv_tiny_ttf_create_file(const char * path, int32_t font_size);
+    void lv_tiny_ttf_destroy(lv_font_t * font);
 }
 
 static const lv_font_t* get_cn_font(int size) {
@@ -160,32 +160,26 @@ void ui_init() {
     s_focus_group = lv_group_create();
     lv_group_set_default(s_focus_group);
 
-    // Try loading Chinese fonts from USB first, then SPIFFS
-    Serial.println("[UI] Loading Chinese fonts...");
+    // Load Chinese fonts using TinyTTF from LittleFS
+    Serial.println("[UI] Loading Chinese fonts via TinyTTF...");
     
-    // Try USB paths first
-    const char* font_paths_14[] = {
-        "A:/cn_font_14.bin",      // SPIFFS via LVGL FS_POSIX
-        "/usb/cn_font_14.bin",    // USB MSC direct path
-        nullptr
-    };
-    const char* font_paths_16[] = {
-        "A:/cn_font_16.bin",
-        "/usb/cn_font_16.bin",
+    const char* otf_paths[] = {
+        "A:/NotoSansSC-Regular.otf",   // LittleFS via LVGL FS_POSIX
+        "/usb/NotoSansSC-Regular.otf", // USB MSC
         nullptr
     };
     
-    for (int i = 0; font_paths_14[i]; i++) {
-        s_cn_font_14 = lv_binfont_create(font_paths_14[i]);
+    for (int i = 0; otf_paths[i]; i++) {
+        s_cn_font_14 = lv_tiny_ttf_create_file(otf_paths[i], 14);
         if (s_cn_font_14) {
-            Serial.printf("[UI] CN font 14 loaded from: %s\n", font_paths_14[i]);
+            Serial.printf("[UI] CN font 14 loaded from: %s\n", otf_paths[i]);
             break;
         }
     }
-    for (int i = 0; font_paths_16[i]; i++) {
-        s_cn_font_16 = lv_binfont_create(font_paths_16[i]);
+    for (int i = 0; otf_paths[i]; i++) {
+        s_cn_font_16 = lv_tiny_ttf_create_file(otf_paths[i], 16);
         if (s_cn_font_16) {
-            Serial.printf("[UI] CN font 16 loaded from: %s\n", font_paths_16[i]);
+            Serial.printf("[UI] CN font 16 loaded from: %s\n", otf_paths[i]);
             break;
         }
     }
