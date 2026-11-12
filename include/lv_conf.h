@@ -1,7 +1,7 @@
 /**
  * @file lv_conf.h
- * ZLRomi NEO Music Player - LVGL配置
- * ESP32-S3 + ST7789 240x320 + PCM5102A + Bluetooth A2DP
+ * ZLRomi NEO Music Player - LVGL v9 Configuration
+ * ESP32-S3 + ST7789 240x320 + HW-678
  */
 
 #if 1
@@ -13,7 +13,6 @@
    COLOR SETTINGS
  *====================*/
 #define LV_COLOR_DEPTH 16
-#define LV_COLOR_16_SWAP 0
 
 /*=========================
    STDLIB WRAPPER SETTINGS
@@ -21,12 +20,6 @@
 #define LV_USE_STDLIB_MALLOC    LV_STDLIB_CLIB
 #define LV_USE_STDLIB_STRING    LV_STDLIB_CLIB
 #define LV_USE_STDLIB_SPRINTF   LV_STDLIB_CLIB
-
-#if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
-    #define LV_MEM_SIZE (128 * 1024U)   // 减小到128KB，其余用PSRAM
-    #define LV_MEM_POOL_EXPAND_SIZE 0
-    #define LV_MEM_ADR 0
-#endif
 
 /*====================
    HAL SETTINGS
@@ -65,8 +58,6 @@
 #define LV_FONT_SIMSUN_16_CJK 1
 #define LV_FONT_SOURCE_HAN_SANS_SC_14_CJK 1
 #define LV_FONT_SOURCE_HAN_SANS_SC_16_CJK 1
-#define LV_FONT_SOURCE_HAN_SANS_SC_18_CJK 1
-#define LV_FONT_SOURCE_HAN_SANS_SC_20_CJK 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 /*=================
@@ -87,7 +78,10 @@
 #define LV_USE_DROPDOWN   1
 #define LV_USE_IMAGE      1
 #define LV_USE_LABEL      1
-#define LV_USE_KEYBOARD   1
+#if LV_USE_LABEL
+    #define LV_LABEL_TEXT_SELECTION 1
+    #define LV_LABEL_LONG_TXT_HINT 1
+#endif
 #define LV_USE_LINE       1
 #define LV_USE_LIST       1
 #define LV_USE_MSGBOX     1
@@ -96,6 +90,10 @@
 #define LV_USE_SPINNER    1
 #define LV_USE_SWITCH     1
 #define LV_USE_TEXTAREA   1
+#define LV_USE_KEYBOARD   1
+#define LV_USE_TABLE      1
+#define LV_USE_TABVIEW    1
+#define LV_USE_TILEVIEW   1
 
 /* Pinyin IME */
 #define LV_USE_IME_PINYIN 1
@@ -134,7 +132,7 @@
 #endif
 
 /*==================
- * FILE SYSTEM (for loading fonts from SPIFFS)
+ * FILE SYSTEM (for loading fonts from LittleFS)
  *==================*/
 #define LV_USE_FS_POSIX 1
 #if LV_USE_FS_POSIX
@@ -149,7 +147,15 @@
 #define LV_USE_ST7789 1
 #define LV_USE_GENERIC_MIPI 1
 #define LV_USE_TFT_ESPI 1
-#define LV_USE_GENERIC_MIPI 1
+
+/*==================
+ * IMAGE DECODERS
+ *==================*/
+#define LV_USE_LIBPNG 0
+#define LV_USE_BMP 0
+#define LV_USE_SJPG 0
+#define LV_USE_GIF 1
+#define LV_USE_QRCODE 0
 
 /*==================
  * DEMOS (disabled)
