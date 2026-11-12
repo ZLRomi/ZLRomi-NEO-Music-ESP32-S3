@@ -14,12 +14,13 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "usb/usb_host.h"
-
-// Include local MSC host headers (in same directory)
-extern "C" {
 #include "msc_host.h"
 #include "msc_host_vfs.h"
-}
+
+// MSC event types from msc_host.h (anonymous enum inside struct)
+// In C++ we need to reference them properly
+static const int EVT_MSC_CONNECTED = 0;     // MSC_DEVICE_CONNECTED
+static const int EVT_MSC_DISCONNECTED = 1;  // MSC_DEVICE_DISCONNECTED
 
 static const char *TAG = "USB_HOST";
 
@@ -39,10 +40,10 @@ static bool s_mounted = false;
 
 static void msc_event_cb(const msc_host_event_t *event, void *arg)
 {
-    if (event->event == MSC_DEVICE_CONNECTED) {
+    if (event->event == EVT_MSC_CONNECTED) {
         ESP_LOGI(TAG, "MSC device connected, addr=%d", event->device.address);
         xEventGroupSetBits(s_usb_flags, DEVICE_CONNECTED | (event->device.address << 4));
-    } else if (event->event == MSC_DEVICE_DISCONNECTED) {
+    } else if (event->event == EVT_MSC_DISCONNECTED) {
         ESP_LOGI(TAG, "MSC device disconnected");
         xEventGroupSetBits(s_usb_flags, DEVICE_DISCONNECTED);
     }
