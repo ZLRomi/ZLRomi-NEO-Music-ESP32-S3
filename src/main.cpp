@@ -20,6 +20,7 @@
 #include "music.h"
 #include "task.h"
 #include "bt_a2dp.h"
+#include "api.h"
 
 // =====================================================================
 //  Hardware Pins (HW-678)
@@ -43,6 +44,18 @@
 static TFT_eSPI tft;
 static const int btn_pins[] = {BTN_UP_PIN, BTN_DOWN_PIN, BTN_LEFT_PIN, BTN_RIGHT_PIN, BTN_OK_PIN, BTN_SET_PIN, BTN_RST_PIN};
 static bool btn_last[7] = {true, true, true, true, true, true, true};
+
+// Search & playback state
+static SongInfo g_search_results[20];
+static int g_search_count = 0;
+static RecommendPlaylist g_recommend[10];
+static int g_recommend_count = 0;
+static SongInfo g_current_song;
+static PlayUrlInfo g_play_url;
+static LyricsData g_lyrics;
+
+// Extern from ui.cpp for search textarea access
+extern lv_obj_t *s_ta_search;
 
 // =====================================================================
 //  LVGL Display Flush (v9 API)
@@ -162,11 +175,102 @@ void setup()
     SD_init();
     music_init();
     bt_a2dp_init();
+    api_init();
     ui_init();
     task_init();
     WiFi_init();
 
     Serial.println("[OK] Ready");
+}
+
+// =====================================================================
+//  Button event handling (7-key navigation)
+// =====================================================================
+static void handle_buttons() {
+    static bool last_state[7] = {true, true, true, true, true, true, true};
+    const int pins[] = {BTN_UP_PIN, BTN_DOWN_PIN, BTN_LEFT_PIN, BTN_RIGHT_PIN, BTN_OK_PIN, BTN_SET_PIN, BTN_RST_PIN};
+
+    for (int i = 0; i < 7; i++) {
+        bool pressed = (digitalRead(pins[i]) == LOW);
+        if (pressed && last_state[i]) {
+            // New press event
+            PageId page = ui_current_page();
+            switch ((ButtonId)i) {
+                case BTN_UP:
+                    ui_focus_move(-1);
+                    break;
+                case BTN_DOWN:
+                    if (page == PAGE_MAIN) {
+                        ui_navigate(PAGE_SETTINGS);
+                    } else {
+                        ui_focus_move(1);
+                    }
+                    break;
+                case BTN_LEFT:
+                    // Previous song or page back
+                    if (page == PAGE_PLAYING || page == PAGE_LYRICS) {
+                        // TODO: prev song
+                    }
+                    break;
+                case BTN_RIGHT:
+                    // Next song
+                    if (page == PAGE_PLAYING || page == PAGE_LYRICS) {
+                        // TODO: next song
+                    }
+                    break;
+                case BTN_OK:
+                    if (page == PAGE_MAIN) {
+                        // Load recommend playlists on first OK
+                        if (g_recommend_count == 0 && WiFi.status() == WL_CONNECTED) {
+                            g_recommend_count = api_get_recommend_playlists(g_recommend, 10);
+                            ui_update_recommend_list();
+                        }
+                    } else if (page == PAGE_SEARCH) {
+                        // Execute search
+                        const char* kw = lv_textarea_get_text(s_ta_search);
+                        if (kw && strlen(kw) > 0 && WiFi.status() == WL_CONNECTED) {
+                            Serial.printf("[Search] keyword: %s\n", kw);
+                            g_search_count = api_search(kw, g_search_results, 20);
+                            ui_update_search_results();
+                            if (g_search_count > 0) {
+                                ui_show_toast("\xe6\x89\xbe\xe5\x88\xb0\xe6\xad\x8c\xe6\x9b\xb2");
+                            } else {
+                                ui_show_toast("\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0");
+                            }
+                        }
+                    } else if (page == PAGE_PLAYING) {
+                        // Toggle play/pause
+                        Music.play_flag = !Music.play_flag;
+                        Music.pause_flag = !Music.play_flag;
+                    }
+                    break;
+                case BTN_SET:
+                    if (page == PAGE_MAIN) {
+                        ui_navigate(PAGE_SEARCH);
+                    } else if (page == PAGE_SEARCH) {
+                        ui_navigate(PAGE_MAIN);
+                    } else if (page == PAGE_PLAYING) {
+                        ui_navigate(PAGE_MAIN);
+                    } else if (page == PAGE_LYRICS) {
+                        ui_navigate(PAGE_PLAYING);
+                    } else if (page == PAGE_SETTINGS) {
+                        ui_navigate(PAGE_MAIN);
+                    } else if (page == PAGE_WIFI) {
+                        ui_navigate(PAGE_SETTINGS);
+                    } else if (page == PAGE_PLAYLIST) {
+                        ui_navigate(PAGE_MAIN);
+                    }
+                    break;
+                case BTN_RST:
+                    // Long press handled in loop
+                    break;
+            }
+            last_state[i] = false;
+        }
+        if (!pressed) {
+            last_state[i] = true;
+        }
+    }
 }
 
 void loop()
@@ -180,6 +284,7 @@ void loop()
     }
 
     lv_timer_handler();
+    handle_buttons();
 
     // Long press RST to restart
     static uint32_t rst_press_time = 0;
