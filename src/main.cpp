@@ -19,6 +19,7 @@
 #include "api.h"
 #include "input.h"
 #include "settings.h"
+#include "usb_host/usb_host_msc.h"
 
 // =====================================================================
 //  硬件引脚
@@ -385,21 +386,9 @@ void setup() {
 
     // 初始化USB Host MSC（U盘读取字体文件）
     Serial.println("[USB] Initializing USB Host MSC...");
-    msc.onMount([](uint8_t lun, const char *name) {
-        Serial.printf("[USB] Mounted: LUN=%d name=%s\n", lun, name);
-        usb_mounted = true;
-    });
-    msc.onUnmount([](uint8_t lun) {
-        Serial.printf("[USB] Unmounted: LUN=%d\n", lun);
-        usb_mounted = false;
-    });
-    msc.onError([](uint8_t lun, uint8_t error) {
-        Serial.printf("[USB] Error: LUN=%d err=%d\n", lun, error);
-    });
-    USB.begin();
-    msc.begin();
-    delay(1000);  // Wait for USB enumeration
-    Serial.printf("[USB] mounted=%d\n", usb_mounted);
+    usb_host_init();
+    delay(2000);  // Wait for USB enumeration
+    Serial.printf("[USB] mounted=%d\n", usb_host_is_mounted());
 
     // 初始化设置
     Serial.println("[2] Settings init...");
