@@ -1,4 +1,4 @@
-name: Build Firmware
+name: Build Firmware (ESP-IDF)
 
 on:
   push:
@@ -15,61 +15,19 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       
-    - name: Cache pip
-      uses: actions/cache@v4
+    - name: Setup ESP-IDF and Build
+      uses: espressif/esp-idf-ci-action@v1
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-          
-    - name: Cache PlatformIO
-      uses: actions/cache@v4
-      with:
-        path: ~/.platformio
-        key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
-        restore-keys: |
-          ${{ runner.os }}-platformio-
-          
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        
-    - name: Install PlatformIO
-      run: |
-        python -m pip install --upgrade pip
-        pip install platformio
-        
-    - name: Generate Chinese font
-      run: |
-        npm install -g lv_font_conv
-        mkdir -p data
-        curl -L -o /tmp/NotoSansSC-Regular.otf \
-          "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf"
-        lv_font_conv --font /tmp/NotoSansSC-Regular.otf --size 14 --bpp 2 --format lvgl \
-          --output data/cn_font_14.bin \
-          --symbols "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()_+-=[]{}|;':"",./<>?~·。，、；：！？""''（）【】《》…" \
-          -r 0x4E00-0x6FFF 2>&1 || true
-        lv_font_conv --font /tmp/NotoSansSC-Regular.otf --size 16 --bpp 2 --format lvgl \
-          --output data/cn_font_16.bin \
-          --symbols "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !@#$%^&*()_+-=[]{}|;':"",./<>?~·。，、；：！？""''（）【】《》…" \
-          -r 0x4E00-0x6FFF 2>&1 || true
-        ls -lh data/
-        
-    - name: Build firmware
-      run: pio run -e esp32-s3-devkitc-1
-      
-    - name: Build LittleFS image
-      run: pio run -t buildfs -e esp32-s3-devkitc-1 || true
-        
+        esp_idf_version: v5.3.1
+        target: esp32s3
+        command: idf.py build
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: NEO-Music-Firmware
         path: |
-          .pio/build/esp32-s3-devkitc-1/firmware.bin
-          .pio/build/esp32-s3-devkitc-1/bootloader.bin
-          .pio/build/esp32-s3-devkitc-1/partitions.bin
-          .pio/build/esp32-s3-devkitc-1/littlefs.bin
+          build/bootloader/bootloader.bin
+          build/partition_table/partition-table.bin
+          build/esp32-mp3-player.bin
         retention-days: 30
