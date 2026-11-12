@@ -27,10 +27,17 @@ void gfx_blit(int x, int y, int w, int h, const uint16_t *buf);
 /** 最近邻缩放贴图：封面从 56x56 缩到列表行的 40x40 */
 void gfx_blit_scaled(int x, int y, int w, int h,
                      const uint16_t *src, int sw, int sh);
+/** 单像素写入（图标绘制用），越界自动忽略 */
+void gfx_pixel(int x, int y, uint16_t color);
 
 int  gfx_text(int x, int y, const char *s, uint16_t fg, uint16_t bg);
 int  gfx_text_width(const char *s);
 int  gfx_text_center(int y, const char *s, uint16_t fg, uint16_t bg);
+
+/** 小号字（16x16）：一行能放 20 个汉字，用于列表与副信息 */
+int  gfx_text_small(int x, int y, const char *s, uint16_t fg, uint16_t bg);
+int  gfx_text_width_small(const char *s);
+int  gfx_text_center_small(int y, const char *s, uint16_t fg, uint16_t bg);
 
 /** 焦点条：左侧琥珀竖线 + 抬起的底色，电视遥控风格 */
 void gfx_focus_row(int x, int y, int w, int h, bool focused, uint16_t bg);

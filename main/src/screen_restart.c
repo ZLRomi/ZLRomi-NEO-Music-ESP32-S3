@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "gfx.h"
+#include "icon.h"
 #include "theme.h"
 
 static const char *TAG = "restart";
@@ -24,17 +25,18 @@ static void restart_draw(void)
 {
     gfx_fill(g_theme.bg);
 
-    gfx_text_center(38, "重启设备", g_theme.accent, g_theme.bg);
-    gfx_hline(56, GFX_W - 56, 74, g_theme.line);
+    gfx_icon(GFX_W / 2 - 8, 30, ICON_GEAR, g_theme.accent);
+    gfx_text_center_small(56, "重启设备", g_theme.accent, g_theme.bg);
+    gfx_hline(56, GFX_W - 56, 80, g_theme.line);
 
-    gfx_text_center(100, "再长按 RST 键 3 秒", g_theme.text, g_theme.bg);
-    gfx_text_center(128, "即可重新启动", g_theme.text, g_theme.bg);
-    gfx_text_center(160, "按 SET 或 OK 取消", g_theme.text_dim, g_theme.bg);
+    gfx_text_center_small(100, "再长按 RST 键 3 秒", g_theme.text, g_theme.bg);
+    gfx_text_center_small(122, "即可重新启动", g_theme.text, g_theme.bg);
+    gfx_text_center_small(150, "按 SET 或 OK 取消", g_theme.text_dim, g_theme.bg);
 
     /* 唯一可聚焦元素，始终高亮，电视遥控风格 */
     int w = 200, x = (GFX_W - w) / 2, y = 196, h = 32;
     gfx_focus_row(x, y, w, h, true, g_theme.bg);
-    gfx_text_center(y + 4, "取消返回", g_theme.text, g_theme.focus);
+    gfx_text_center_small(y + 8, "取消返回", g_theme.text, g_theme.focus);
 }
 
 static bool restart_event(input_event_t ev)

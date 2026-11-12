@@ -49,11 +49,11 @@ static void draw_cell(int index, bool focused)
     char label[16];
     pinyin_key_label(index, &s_py, label, sizeof(label));
     if (label[0]) {
-        int tw = gfx_text_width(label);
+        int tw = gfx_text_width_small(label);
         int tx = x + (CELL_W - tw) / 2;
         if (tx < x) tx = x;
-        gfx_text(tx, y + (CELL_H - 24) / 2, label,
-                 focused ? g_theme.accent : g_theme.text, bg);
+        gfx_text_small(tx, y + (CELL_H - 16) / 2, label,
+                       focused ? g_theme.accent : g_theme.text, bg);
     }
 }
 
@@ -64,13 +64,13 @@ static void search_draw(void)
     /* 输入区：已上屏中文 + 正在拼的拼音 + 光标 */
     char line[96];
     snprintf(line, sizeof(line), "%s%s_", s_py.text, s_py.input);
-    gfx_text(8, 2, line, g_theme.text, g_theme.bg);
-    gfx_hline(8, GFX_W - 8, 32, g_theme.line);
+    gfx_text_small(8, 4, line, g_theme.text, g_theme.bg);
+    gfx_hline(8, GFX_W - 8, 26, g_theme.line);
 
     for (int i = 0; i < PY_KEYS; i++) {
         draw_cell(i, s_focus.index == i);
     }
-    gfx_text_center(214, "方向键移动  OK 输入  SET 返回", g_theme.text_dim, g_theme.bg);
+    gfx_text_center_small(216, "方向键移动  OK 输入  SET 返回", g_theme.text_dim, g_theme.bg);
 }
 
 static void search_tick(void)

@@ -278,6 +278,15 @@ void gfx_blit_scaled(int x, int y, int w, int h,
     mark_dirty(y, y + h);
 }
 
+void gfx_pixel(int x, int y, uint16_t color)
+{
+    if (!s_fb) return;
+    y += s_offset_y;
+    if (x < 0 || y < 0 || x >= GFX_W || y >= GFX_H) return;
+    s_fb[(size_t)y * GFX_W + x] = to_panel(color);
+    mark_dirty(y, y + 1);
+}
+
 int gfx_text_width(const char *s)
 {
     return s ? font_text_width(s) : 0;
@@ -294,13 +303,32 @@ static inline uint16_t blend565(uint16_t bg, uint16_t fg, unsigned a)
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-int gfx_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
+/* 一套字体的参数：汉字宽高、ASCII 宽、两种字形的行字节数 */
+typedef struct {
+    int cw, ch;          /* 汉字宽 / 高 */
+    int aw;              /* ASCII 显示宽 */
+    int cstride;         /* 汉字字形每行字节 */
+    int astride;         /* ASCII 字形每行字节 */
+    const uint8_t *(*cn)(uint32_t cp);
+    const uint8_t *(*asc)(int c);
+} fontset_t;
+
+static const fontset_t FS_BIG = {
+    FONT_W, FONT_H, FONT_ASCII_W, FONT_W / 2, FONT_W / 2, font_lookup, font_ascii
+};
+static const fontset_t FS_SMALL = {
+    FONT16_W, FONT16_H, FONT16_ASCII_W, FONT16_W / 2, (FONT16_ASCII_W + 1) / 2,
+    font_lookup16, font_ascii16
+};
+
+static int draw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg,
+                     const fontset_t *fs)
 {
     if (!s_fb || !s) return 0;
     y += s_offset_y;
-    int total = font_text_width(s);
+    int total = (fs == &FS_SMALL) ? font_text_width16(s) : font_text_width(s);
     if (total <= 0) return 0;
-    if (y < 0 || y + FONT_H > GFX_H) return total;
+    if (y < 0 || y + fs->ch > GFX_H) return total;
 
     int vx0 = x < 0 ? 0 : x;
     int vx1 = x + total > GFX_W ? GFX_W : x + total;
@@ -308,33 +336,43 @@ int gfx_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
     if (w <= 0) return total;
 
     uint16_t pb = to_panel(bg);
-    for (int i = 0; i < w * FONT_H; i++) s_line[i] = pb;
+    for (int i = 0; i < w * fs->ch; i++) s_line[i] = pb;
 
     int cx = x;
     for (const char *p = s; *p;) {
         int n = 1;
         uint32_t cp = font_utf8_next(p, &n);
-        const uint8_t *g = (cp < 0x80) ? font_ascii((int)cp) : font_lookup(cp);
-        int gw = (cp < 0x80) ? FONT_ASCII_W : FONT_W;
+        const uint8_t *g;
+        int gw, stride;
+
+        if (cp < 0x80) {
+            g      = fs->asc((int)cp);
+            gw     = fs->aw;
+            stride = fs->astride;
+        } else {
+            g      = fs->cn(cp);
+            gw     = fs->cw;
+            stride = fs->cstride;
+        }
 
         int gx0 = (cx < vx0) ? (vx0 - cx) : 0;
         int gx1 = (cx + gw > vx1) ? (vx1 - cx) : gw;
         int dx = cx - vx0;
 
-        for (int ry = 0; ry < FONT_H; ry++) {
+        for (int ry = 0; ry < fs->ch; ry++) {
             if (!g) {
                 /* 字库缺字：画空心方块，一眼能看出缺哪个字 */
-                if (gx0 <= 0 && gx1 >= gw && (ry == 0 || ry == FONT_H - 1)) {
+                if (gx0 <= 0 && gx1 >= gw && (ry == 0 || ry == fs->ch - 1)) {
                     for (int rx = 0; rx < gw; rx++)
                         s_line[ry * w + dx + rx] = to_panel(fg);
-                } else if (ry > 0 && ry < FONT_H - 1) {
+                } else if (ry > 0 && ry < fs->ch - 1) {
                     int rx = (gx0 <= 0) ? 0 : gw - 1;
                     if (rx >= gx0 && rx < gx1)
                         s_line[ry * w + dx + rx] = to_panel(fg);
                 }
                 continue;
             }
-            const uint8_t *row = g + ry * (FONT_W / 2);
+            const uint8_t *row = g + ry * stride;
             for (int rx = gx0; rx < gx1; rx++) {
                 uint8_t b = row[rx >> 1];
                 unsigned a = (rx & 1) ? (b & 0x0F) : (b >> 4);
@@ -345,12 +383,35 @@ int gfx_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
         p += n;
     }
 
-    for (int ry = 0; ry < FONT_H; ry++) {
+    for (int ry = 0; ry < fs->ch; ry++) {
         memcpy(&s_fb[(size_t)(y + ry) * GFX_W + vx0],
                &s_line[(size_t)ry * w], (size_t)w * sizeof(uint16_t));
     }
-    mark_dirty(y, y + FONT_H);
+    mark_dirty(y, y + fs->ch);
     return total;
+}
+
+int gfx_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
+{
+    return draw_text(x, y, s, fg, bg, &FS_BIG);
+}
+
+int gfx_text_small(int x, int y, const char *s, uint16_t fg, uint16_t bg)
+{
+    return draw_text(x, y, s, fg, bg, &FS_SMALL);
+}
+
+int gfx_text_width_small(const char *s)
+{
+    return s ? font_text_width16(s) : 0;
+}
+
+int gfx_text_center_small(int y, const char *s, uint16_t fg, uint16_t bg)
+{
+    int tw = gfx_text_width_small(s);
+    int x = (GFX_W - tw) / 2;
+    gfx_text_small(x, y, s, fg, bg);
+    return x;
 }
 
 int gfx_text_center(int y, const char *s, uint16_t fg, uint16_t bg)
@@ -380,8 +441,8 @@ void gfx_set_rotation(int mode)
     if (!s_panel) return;
     bool swap = true, mx = false, my = false;
     switch (mode & 3) {
-    case 0: swap = true;  mx = false; my = true;  break;   /* 横屏（默认） */
-    case 1: swap = true;  mx = true;  my = false; break;   /* 横屏翻转 180° */
+    case 0: swap = true;  mx = true;  my = false; break;   /* 横屏（默认，实测方向） */
+    case 1: swap = true;  mx = false; my = true;  break;   /* 横屏翻转 180° */
     case 2: swap = false; mx = false; my = false; break;   /* 竖屏 */
     case 3: swap = false; mx = true;  my = true;  break;   /* 竖屏翻转 */
     }

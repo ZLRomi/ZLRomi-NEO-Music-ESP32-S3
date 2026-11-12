@@ -12,6 +12,7 @@
 #include "board.h"
 #include "esp_system.h"
 #include "gfx.h"
+#include "icon.h"
 #include "music_state.h"
 #include "player.h"
 #include "settings.h"
@@ -19,7 +20,7 @@
 #include "wifi_mgr.h"
 
 #define ITEM_COUNT  7
-#define ROW_Y0      38
+#define ROW_Y0      34
 #define ROW_H       24
 
 static focus_t s_focus;
@@ -61,32 +62,37 @@ static void item_value(int i, char *buf, size_t cap)
 static void settings_draw(void)
 {
     gfx_fill(g_theme.bg);
-    gfx_text(10, 2, "设置", g_theme.accent, g_theme.bg);
-    gfx_hline(10, GFX_W - 10, 30, g_theme.line);
+    gfx_icon(8, 3, ICON_GEAR, g_theme.accent);
+    gfx_text(28, 2, "设置", g_theme.accent, g_theme.bg);
+    gfx_hline(8, GFX_W - 8, 28, g_theme.line);
 
     static const char *labels[ITEM_COUNT] = {
         "WiFi 网络", "音量", "音质", "屏幕亮度", "屏幕方向", "播放模式", "关于本机"
+    };
+    static const icon_id_t icons[ITEM_COUNT] = {
+        ICON_WIFI, ICON_SOUND, ICON_NOTE, ICON_SUN, ICON_BACK, ICON_LIST, ICON_CHECK
     };
 
     for (int i = 0; i < ITEM_COUNT; i++) {
         int y = ROW_Y0 + i * ROW_H;
         bool focused = (s_focus.index == i);
-        gfx_focus_row(8, y, GFX_W - 16, ROW_H - 2, focused,
+        gfx_focus_row(6, y, GFX_W - 12, ROW_H - 2, focused,
                       (i % 2 == 0) ? g_theme.bg : g_theme.surface);
         uint16_t bg = focused ? g_theme.focus
                               : ((i % 2 == 0) ? g_theme.bg : g_theme.surface);
-        gfx_text(14, y + 1, labels[i], g_theme.text, bg);
+        gfx_icon(10, y + 5, icons[i], focused ? g_theme.accent : g_theme.text_dim);
+        gfx_text_small(32, y + 5, labels[i], g_theme.text, bg);
 
         char val[64];
         item_value(i, val, sizeof(val));
-        int vw = gfx_text_width(val);
-        int vx = GFX_W - 14 - vw;
-        if (vx < 130) vx = 130;
-        gfx_text(vx, y + 1, val, g_theme.text_dim, bg);
+        int vw = gfx_text_width_small(val);
+        int vx = GFX_W - 12 - vw;
+        if (vx < 150) vx = 150;
+        gfx_text_small(vx, y + 5, val, g_theme.text_dim, bg);
     }
 
-    gfx_text_center(212, "上下选择  左右调整  OK 切换  SET 返回",
-                    g_theme.text_dim, g_theme.bg);
+    gfx_text_center_small(214, "上下选择  左右调整  OK 切换  SET 返回",
+                          g_theme.text_dim, g_theme.bg);
 }
 
 static void adjust(int i, int delta)

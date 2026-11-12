@@ -22,6 +22,16 @@ extern "C" {
 #define FONT_ASCII_W      11
 #define FONT_GLYPH_BYTES  (FONT_W * FONT_H / 2)   /* 240 */
 
+/* ── 小号字库 16x16 ──────────────────────────────────────────
+   大字一行只放得下 16 个汉字，歌名/歌手这类长文本显示不下；
+   小字一行能放 20 个汉字，行高也从 24 降到 16。
+   由 scripts/gen_font16.py 生成，码位表与上面的大字库完全一致。 */
+#define FONT16_W           16
+#define FONT16_H           16
+#define FONT16_ASCII_W     9
+#define FONT16_CN_BYTES    (FONT16_W * FONT16_H / 2)                  /* 128 */
+#define FONT16_ASCII_BYTES (((FONT16_ASCII_W + 1) / 2) * FONT16_H)  /* 80 */
+
 /** @brief GB2312 汉字码位表（升序），下标即字形序号 */
 extern const uint16_t g_cn_codepoints[];
 extern const int      g_cn_codepoints_count;
@@ -34,6 +44,17 @@ const uint8_t *font_lookup(uint32_t cp);
 
 /** @brief 取 ASCII 字形（c 必须在 32~126） */
 const uint8_t *font_ascii(int c);
+
+/* ── 小号字库（16x16）对应接口 ─────────────────────────────── */
+
+/** @brief 按 Unicode 码位取 16x16 字形；字库没有该字时返回 NULL */
+const uint8_t *font_lookup16(uint32_t cp);
+
+/** @brief 取 16x16 的 ASCII 字形（c 必须在 32~126） */
+const uint8_t *font_ascii16(int c);
+
+/** @brief 一段文本在小字下占多少像素宽 */
+int font_text_width16(const char *s);
 
 /**
  * @brief 解码一个 UTF-8 字符

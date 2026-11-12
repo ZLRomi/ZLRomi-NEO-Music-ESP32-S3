@@ -11,17 +11,19 @@
 
 #include "cover.h"
 #include "esp_attr.h"
+#include "esp_timer.h"
 #include "gfx.h"
+#include "icon.h"
 #include "music_state.h"
 #include "netease.h"
 #include "theme.h"
 
-#define ROW_H     50
-#define ROW_Y0    38
-#define VISIBLE   4
-#define ROW_X     8
-#define ROW_W     (GFX_W - 16)
-#define ICON      40
+#define ROW_H     36
+#define ROW_Y0    34
+#define VISIBLE   5
+#define ROW_X     6
+#define ROW_W     (GFX_W - 12)
+#define ART       32
 
 static focus_t s_focus;
 static int     s_top;
@@ -55,9 +57,29 @@ static void ensure_visible(void)
 
 static void draw_placeholder(int x, int y)
 {
-    gfx_rect(x, y, x + ICON, y + ICON, g_theme.surface_hi);
-    gfx_frame(x, y, x + ICON, y + ICON, g_theme.line);
-    gfx_text(x + 12, y + 8, "曲", g_theme.accent_dim, g_theme.surface_hi);
+    gfx_rect(x, y, x + ART, y + ART, g_theme.surface_hi);
+    gfx_frame(x, y, x + ART, y + ART, g_theme.line);
+    gfx_icon(x + (ART - 16) / 2, y + (ART - 16) / 2, ICON_NOTE, g_theme.accent_dim);
+}
+
+/** 歌名太长就横向滚动（只滚焦点那一行，避免满屏都在动） */
+static void draw_scroll_text(int x, int y, int maxw, const char *s,
+                             uint16_t fg, uint16_t bg)
+{
+    int tw = gfx_text_width_small(s);
+    if (tw <= maxw) {
+        gfx_text_small(x, y, s, fg, bg);
+        return;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    int  span  = tw - maxw + 20;           /* 需要滑动的距离 */
+    int  cycle = span / 20 + 3;            /* 每秒 20px 的格数 */
+    int  phase = (int)(now % (cycle * 2));
+    int  off   = (phase < cycle) ? phase * 20 : (cycle * 2 - phase) * 20;
+    if (off > span) off = span;
+
+    gfx_text_small(x - off, y, s, fg, bg);
+    gfx_text_small(x - off + tw + 20, y, s, fg, bg);
 }
 
 static void songs_draw(void)
@@ -68,11 +90,11 @@ static void songs_draw(void)
     char title[96];
     snprintf(title, sizeof(title), "%s  %d 首",
              g_music.list_title, g_music.songs.count);
-    gfx_text(10, 4, title, g_theme.accent, g_theme.bg);
-    gfx_hline(10, GFX_W - 10, 34, g_theme.line);
+    gfx_text_small(8, 4, title, g_theme.accent, g_theme.bg);
+    gfx_hline(8, GFX_W - 8, 26, g_theme.line);
 
     if (g_music.songs.count == 0) {
-        gfx_text_center(110, "列表为空，请检查网络", g_theme.text_dim, g_theme.bg);
+        gfx_text_center_small(110, "列表为空，请检查网络", g_theme.text_dim, g_theme.bg);
         return;
     }
 
@@ -86,11 +108,11 @@ static void songs_draw(void)
         gfx_focus_row(ROW_X, y, ROW_W, ROW_H - 2, focused,
                       (v % 2 == 0) ? g_theme.bg : g_theme.surface);
 
-        int cx = ROW_X + 5, cy = y + 5;
+        int cx = ROW_X + 4, cy = y + 2;
         bool have = false;
         for (int k = 0; k < VISIBLE; k++) {
             if (s_cover_ok[k] && s_cover_ids[k] == s->id) {
-                gfx_blit_scaled(cx, cy, ICON, ICON,
+                gfx_blit_scaled(cx, cy, ART, ART,
                                 s_covers[k].px, COVER_W, COVER_H);
                 have = true;
                 break;
@@ -100,17 +122,24 @@ static void songs_draw(void)
 
         uint16_t bg = focused ? g_theme.focus
                               : ((v % 2 == 0) ? g_theme.bg : g_theme.surface);
-        /* 歌名过长时截断到一行 */
-        char name[SONG_NAME_LEN];
-        strncpy(name, s->name, sizeof(name) - 1);
-        name[sizeof(name) - 1] = '\0';
-        while (gfx_text_width(name) > ROW_W - ICON - 16 && strlen(name) > 3) {
-            size_t n = strlen(name);
-            size_t back = (name[n - 1] & 0x80) ? 3 : 1;
-            name[n - back] = '\0';
+        int tx = ROW_X + ART + 10;
+        int tw = ROW_W - ART - 16;
+
+        if (focused) {
+            draw_scroll_text(tx, y + 1, tw, s->name, g_theme.text, bg);
+        } else {
+            /* 非焦点行超长时截断 */
+            char name[SONG_NAME_LEN];
+            strncpy(name, s->name, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            while (gfx_text_width_small(name) > tw && strlen(name) > 3) {
+                size_t n = strlen(name);
+                size_t back = (name[n - 1] & 0x80) ? 3 : 1;
+                name[n - back] = '\0';
+            }
+            gfx_text_small(tx, y + 1, name, g_theme.text, bg);
         }
-        gfx_text(ROW_X + ICON + 12, y + 1, name, g_theme.text, bg);
-        gfx_text(ROW_X + ICON + 12, y + 25, s->artist, g_theme.text_dim, bg);
+        gfx_text_small(tx, y + 19, s->artist, g_theme.text_dim, bg);
     }
 }
 

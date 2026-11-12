@@ -9,6 +9,8 @@
 /* EMBED_FILES 生成的符号（font_cn.bin → _binary_font_cn_bin_start） */
 extern const uint8_t _binary_font_cn_bin_start[]    asm("_binary_font_cn_bin_start");
 extern const uint8_t _binary_font_ascii_bin_start[] asm("_binary_font_ascii_bin_start");
+extern const uint8_t _binary_font_cn16_bin_start[]    asm("_binary_font_cn16_bin_start");
+extern const uint8_t _binary_font_ascii16_bin_start[] asm("_binary_font_ascii16_bin_start");
 
 const uint8_t *font_ascii(int c)
 {
@@ -16,6 +18,34 @@ const uint8_t *font_ascii(int c)
         return NULL;
     }
     return _binary_font_ascii_bin_start + (size_t)(c - 32) * FONT_GLYPH_BYTES;
+}
+
+const uint8_t *font_ascii16(int c)
+{
+    if (c < 32 || c > 126) {
+        return NULL;
+    }
+    return _binary_font_ascii16_bin_start + (size_t)(c - 32) * FONT16_ASCII_BYTES;
+}
+
+const uint8_t *font_lookup16(uint32_t cp)
+{
+    int lo = 0;
+    int hi = g_cn_codepoints_count - 1;
+
+    while (lo <= hi) {
+        int      mid = (lo + hi) / 2;
+        uint16_t v   = g_cn_codepoints[mid];
+        if (v == cp) {
+            return _binary_font_cn16_bin_start + (size_t)mid * FONT16_CN_BYTES;
+        }
+        if (v < cp) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return NULL;
 }
 
 const uint8_t *font_lookup(uint32_t cp)
@@ -73,6 +103,18 @@ int font_text_width(const char *s)
         int      n;
         uint32_t cp = font_utf8_next(p, &n);
         w += (cp < 0x80) ? FONT_ASCII_W : FONT_W;
+        p += n;
+    }
+    return w;
+}
+
+int font_text_width16(const char *s)
+{
+    int w = 0;
+    for (const char *p = s; *p;) {
+        int      n;
+        uint32_t cp = font_utf8_next(p, &n);
+        w += (cp < 0x80) ? FONT16_ASCII_W : FONT16_W;
         p += n;
     }
     return w;

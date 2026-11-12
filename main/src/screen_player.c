@@ -13,6 +13,7 @@
 #include "gfx.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
+#include "icon.h"
 #include "music_state.h"
 #include "player.h"
 #include "settings.h"
@@ -20,9 +21,9 @@
 
 #define DISC_SIZE  120
 #define DISC_X     8
-#define DISC_Y     46
-#define INFO_X     144
-#define INFO_W     (GFX_W - INFO_X - 10)
+#define DISC_Y     32
+#define INFO_X     134
+#define INFO_W     (GFX_W - INFO_X - 8)
 
 typedef struct {
     int  ms;
@@ -130,20 +131,24 @@ static void draw_time(char *buf, size_t cap, int ms)
     snprintf(buf, cap, "%02d:%02d", total / 60, total % 60);
 }
 
-static void draw_button(int col, const char *label, bool focused)
+static void draw_button(int col, const char *label, icon_id_t icon, bool focused)
 {
-    int bw = 72, gap = 6, x0 = 8;
+    int bw = 74, gap = 4, x0 = 4;
     int x = x0 + col * (bw + gap);
-    int y = 212, h = 26;
+    int y = 166, h = 32;
+    uint16_t bg = focused ? g_theme.focus : g_theme.surface;
     if (focused) {
-        gfx_rect(x, y, x + bw, y + h, g_theme.focus);
+        gfx_rect(x, y, x + bw, y + h, bg);
         gfx_frame(x, y, x + bw, y + h, g_theme.focus_edge);
     } else {
-        gfx_rect(x, y, x + bw, y + h, g_theme.surface);
+        gfx_rect(x, y, x + bw, y + h, bg);
     }
-    int tw = gfx_text_width(label);
-    gfx_text(x + (bw - tw) / 2, y + 3, label, g_theme.text,
-             focused ? g_theme.focus : g_theme.surface);
+    int tw = gfx_text_width_small(label);
+    int total = 16 + 4 + tw;
+    int ix = x + (bw - total) / 2;
+    gfx_icon(ix, y + 8, icon, focused ? g_theme.accent : g_theme.text_dim);
+    gfx_text_small(ix + 20, y + 8, label,
+                   focused ? g_theme.text : g_theme.text_dim, bg);
 }
 
 static void player_draw(void)
@@ -151,11 +156,12 @@ static void player_draw(void)
     gfx_fill(g_theme.bg);
 
     /* 顶栏 */
-    gfx_text(10, 2, "正在播放", g_theme.accent, g_theme.bg);
+    gfx_icon(8, 4, ICON_NOTE, g_theme.accent);
+    gfx_text(28, 2, "正在播放", g_theme.accent, g_theme.bg);
     const char *mode = music_mode_text();
-    int mw = gfx_text_width(mode);
-    gfx_text(GFX_W - mw - 10, 2, mode, g_theme.text_dim, g_theme.bg);
-    gfx_hline(10, GFX_W - 10, 30, g_theme.line);
+    int mw = gfx_text_width_small(mode);
+    gfx_text_small(GFX_W - mw - 8, 8, mode, g_theme.text_dim, g_theme.bg);
+    gfx_hline(8, GFX_W - 8, 28, g_theme.line);
 
     /* 唱片 */
     render_disc(s_angle);
@@ -166,19 +172,33 @@ static void player_draw(void)
     const char *name = s ? s->name : "暂无歌曲";
     const char *artist = s ? s->artist : "";
     int ix = INFO_X;
-    gfx_text(ix, 40, name, g_theme.text, g_theme.bg);
-    gfx_text(ix, 66, artist, g_theme.text_dim, g_theme.bg);
+
+    /* 歌名太长就横向滚动 */
+    int namew = gfx_text_width_small(name);
+    if (namew > INFO_W) {
+        int64_t now = esp_timer_get_time() / 1000;
+        int  span  = namew - INFO_W + 20;
+        int  cycle = span / 20 + 3;
+        int  phase = (int)(now % (cycle * 2));
+        int  off   = (phase < cycle) ? phase * 20 : (cycle * 2 - phase) * 20;
+        if (off > span) off = span;
+        gfx_text_small(ix - off, 34, name, g_theme.text, g_theme.bg);
+        gfx_text_small(ix - off + namew + 20, 34, name, g_theme.text, g_theme.bg);
+    } else {
+        gfx_text_small(ix, 34, name, g_theme.text, g_theme.bg);
+    }
+    gfx_text_small(ix, 52, artist, g_theme.text_dim, g_theme.bg);
 
     int pos = player_position_ms();
     int dur = player_duration_ms();
     char t1[16], t2[16];
     draw_time(t1, sizeof(t1), pos);
     draw_time(t2, sizeof(t2), dur);
-    gfx_text(ix, 94, t1, g_theme.text, g_theme.bg);
-    int t2w = gfx_text_width(t2);
-    gfx_text(INFO_X + INFO_W - t2w, 94, t2, g_theme.text_dim, g_theme.bg);
+    gfx_text_small(ix, 70, t1, g_theme.text, g_theme.bg);
+    int t2w = gfx_text_width_small(t2);
+    gfx_text_small(INFO_X + INFO_W - t2w, 70, t2, g_theme.text_dim, g_theme.bg);
 
-    int bar_y = 124, bar_w = INFO_W, bar_h = 5;
+    int bar_y = 88, bar_w = INFO_W, bar_h = 5;
     gfx_rect(ix, bar_y, ix + bar_w, bar_y + bar_h, g_theme.surface_hi);
     if (dur > 0) {
         int fill = pos * bar_w / dur;
@@ -189,24 +209,31 @@ static void player_draw(void)
     /* 歌词：当前行高亮，前后各一行，随时间滚动 */
     int cur = current_lrc_line(pos);
     if (s_line_count == 0) {
-        gfx_text(ix, 148, g_music.lyric_ok ? "暂无歌词" : "歌词加载中",
-                 g_theme.text_dim, g_theme.bg);
+        gfx_text_small(ix, 110, g_music.lyric_ok ? "暂无歌词" : "歌词加载中",
+                       g_theme.text_dim, g_theme.bg);
     } else {
         for (int k = -1; k <= 1; k++) {
             int li = cur + k;
             if (li < 0 || li >= s_line_count) continue;
-            int y = 138 + (k + 1) * 24;
-            gfx_text(ix, y, s_lines[li].text,
-                     k == 0 ? g_theme.accent : g_theme.text_dim, g_theme.bg);
+            int y = 104 + (k + 1) * 20;
+            gfx_text_small(ix, y, s_lines[li].text,
+                           k == 0 ? g_theme.accent : g_theme.text_dim, g_theme.bg);
         }
     }
 
-    /* 底部按钮：焦点始终可见 */
-    const char *labels[4] = { "上一首", "暂停", "下一首", "模式" };
-    if (player_state() == PLAYER_PAUSED) labels[1] = "播放";
+    /* 底部按钮：图标 + 文字，焦点始终可见 */
+    static const char *labels[4] = { "上一首", "暂停", "下一首", "模式" };
+    static const icon_id_t icons[4] = { ICON_PREV, ICON_PAUSE, ICON_NEXT, ICON_DISC };
+    bool paused = (player_state() == PLAYER_PAUSED);
+    if (paused) labels[1] = "播放";
     for (int i = 0; i < 4; i++) {
-        draw_button(i, labels[i], s_focus.index == i);
+        icon_id_t ic = icons[i];
+        if (i == 1) ic = paused ? ICON_PLAY : ICON_PAUSE;
+        draw_button(i, labels[i], ic, s_focus.index == i);
     }
+
+    gfx_text_center_small(208, "上下调音量  左右选按钮  SET 返回列表",
+                          g_theme.text_dim, g_theme.bg);
 }
 
 static void player_tick(void)
