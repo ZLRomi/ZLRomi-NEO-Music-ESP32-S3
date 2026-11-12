@@ -12,8 +12,6 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <SPIFFS.h>
-#include <USB.h>
-#include <USBMSC.h>
 
 #include "types.h"
 #include "ui.h"
@@ -28,12 +26,6 @@
 #define PIN_LCD_BL    42
 #define SCREEN_W      240
 #define SCREEN_H      320
-#define PIN_UART_TX   43
-#define PIN_UART_RX   44
-
-// USB Host MSC
-static USBMSC msc;
-static bool usb_mounted = false;
 
 // =====================================================================
 //  全局变量
