@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -15,11 +16,6 @@
 #include "usb/usb_host.h"
 #include "msc_host.h"
 #include "msc_host_vfs.h"
-#include "ffconf.h"
-#include "esp_vfs.h"
-#include "errno.h"
-#include "hal/usb_hal.h"
-#include <esp_vfs_fat.h>
 
 static const char *TAG = "USB_HOST";
 
@@ -75,15 +71,29 @@ static void usb_host_task(void *arg)
         uint8_t dev_addr = (bits & DEVICE_ADDRESS_MASK) >> 4;
         ESP_LOGI(TAG, "Device connected at address %d", dev_addr);
 
-        msc_host_device_info_t info;
-        esp_err_t err = msc_host_install(dev_addr, &info);
+        esp_err_t err = msc_host_install_device(dev_addr, &s_msc_device);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "msc_host_install failed: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "msc_host_install_device failed: %s", esp_err_to_name(err));
             return;
         }
 
-        // Mount FAT filesystem at /usb
-        err = msc_host_vfs_register("/usb", &info);
+        // Get device info
+        msc_host_device_info_t info;
+        err = msc_host_get_device_info(s_msc_device, &info);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "USB device: VID=0x%04X PID=0x%04X sectors=%lu size=%lu",
+                     info.idVendor, info.idProduct,
+                     (unsigned long)info.sector_count, (unsigned long)info.sector_size);
+        }
+
+        // Mount FAT filesystem at /usb via VFS
+        const esp_vfs_fat_mount_config_t mount_config = {
+            .max_files = 8,
+            .format_if_mount_failed = false,
+            .allocation_unit_size = info.sector_size,
+        };
+        msc_host_vfs_handle_t vfs_handle;
+        err = msc_host_vfs_register(s_msc_device, "/usb", &mount_config, &vfs_handle);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "VFS mount failed: %s", esp_err_to_name(err));
         } else {
@@ -112,7 +122,7 @@ static void usb_host_task(void *arg)
             ESP_LOGI(TAG, "Device disconnected");
             s_mounted = false;
             if (s_msc_device) {
-                msc_host_uninstall(s_msc_device);
+                msc_host_uninstall_device(s_msc_device);
                 s_msc_device = NULL;
             }
         }
@@ -141,17 +151,21 @@ void usb_host_init(void)
     }
     ESP_LOGI(TAG, "USB Host installed");
 
-    // Register MSC client
-    const msc_host_client_config_t msc_config = {
-        .platform_event_cb = msc_event_cb,
-        .max_transfer_size = 4096,
+    // Install MSC driver with background task
+    const msc_host_driver_config_t msc_config = {
+        .create_backround_task = true,
+        .task_priority = 5,
+        .stack_size = 4096,
+        .core_id = tskNO_AFFINITY,
+        .callback = msc_event_cb,
+        .callback_arg = NULL,
     };
-    err = msc_host_install_client(&msc_config);
+    err = msc_host_install(&msc_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "msc_host_install_client failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "msc_host_install failed: %s", esp_err_to_name(err));
         return;
     }
-    ESP_LOGI(TAG, "MSC client registered");
+    ESP_LOGI(TAG, "MSC driver installed");
 
     // Create USB event handler task
     xTaskCreate(handle_usb_events, "usb_events", 4096, NULL, 5, NULL);
