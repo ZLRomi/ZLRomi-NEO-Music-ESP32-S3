@@ -12,6 +12,7 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <LittleFS.h>
+#include <FS.h>
 
 #include "types.h"
 #include "ui.h"
