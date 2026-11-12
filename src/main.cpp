@@ -195,30 +195,28 @@ static void handle_buttons() {
         if (pressed && last_state[i]) {
             // New press event
             PageId page = ui_current_page();
-            switch ((ButtonId)i) {
-                case BTN_UP:
+            switch (i) {
+                case 0: // UP
                     ui_focus_move(-1);
                     break;
-                case BTN_DOWN:
+                case 1: // DOWN
                     if (page == PAGE_MAIN) {
                         ui_navigate(PAGE_SETTINGS);
                     } else {
                         ui_focus_move(1);
                     }
                     break;
-                case BTN_LEFT:
-                    // Previous song or page back
+                case 2: // LEFT
                     if (page == PAGE_PLAYING || page == PAGE_LYRICS) {
                         // TODO: prev song
                     }
                     break;
-                case BTN_RIGHT:
-                    // Next song
+                case 3: // RIGHT
                     if (page == PAGE_PLAYING || page == PAGE_LYRICS) {
                         // TODO: next song
                     }
                     break;
-                case BTN_OK:
+                case 4: // OK
                     if (page == PAGE_MAIN) {
                         // Load recommend playlists on first OK
                         if (g_recommend_count == 0 && WiFi.status() == WL_CONNECTED) {
@@ -244,7 +242,7 @@ static void handle_buttons() {
                         Music.pause_flag = !Music.play_flag;
                     }
                     break;
-                case BTN_SET:
+                case 5: // SET
                     if (page == PAGE_MAIN) {
                         ui_navigate(PAGE_SEARCH);
                     } else if (page == PAGE_SEARCH) {
@@ -261,7 +259,7 @@ static void handle_buttons() {
                         ui_navigate(PAGE_MAIN);
                     }
                     break;
-                case BTN_RST:
+                case 6: // RST
                     // Long press handled in loop
                     break;
             }
