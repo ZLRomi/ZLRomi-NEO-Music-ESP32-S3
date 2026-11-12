@@ -1,11 +1,9 @@
 #include "task.h"
-#include "ui/src/ui.h"  
+#include "ui.h"
 #include "wifiuser.h"
 #include "data.h"
 #include "sduser.h"
 #include "music.h"
-#include "xiaozhi_ai.h"
-#include "xiaozhi.h"
 
 TaskHandle_t WiFiHandle = nullptr;
 TaskHandle_t serialHandle = nullptr;
