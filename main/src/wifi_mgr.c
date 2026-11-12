@@ -212,12 +212,10 @@ int wifi_mgr_scan(wifi_ap_t *aps, int max)
         return 0;
     }
 
-    wifi_scan_config_t sc = {
-        .show_hidden = false,
-        .active = false,
-        .passive = false,
-        .max_active_ms = 300,
-    };
+    /* IDF 5.3 的 wifi_scan_config_t 只有这几个字段，没有 active/passive */
+    wifi_scan_config_t sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.show_hidden = false;
     esp_wifi_scan_stop();
     if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
         ESP_LOGW(TAG, "扫描启动失败");
@@ -232,7 +230,7 @@ int wifi_mgr_scan(wifi_ap_t *aps, int max)
         num = (uint16_t)max;
     }
 
-    esp_wifi_ap_record_t *recs = calloc(num, sizeof(esp_wifi_ap_record_t));
+    wifi_ap_record_t *recs = calloc(num, sizeof(wifi_ap_record_t));
     if (!recs) {
         return 0;
     }
