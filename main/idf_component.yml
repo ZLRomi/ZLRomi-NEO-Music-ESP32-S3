@@ -1,0 +1,7 @@
+## IDF Component Manager Manifest
+## cJSON 在 IDF v5.x 已移到组件管理器，不在内置组件里；
+## 少了这份声明，CMake 会报 "Failed to resolve component 'cjson'"。
+dependencies:
+  idf:
+    version: '>=5.0'
+  espressif/cjson: '*'
