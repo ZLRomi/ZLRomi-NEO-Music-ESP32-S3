@@ -130,6 +130,7 @@
 #define LV_USE_TINY_TTF 1
 #if LV_USE_TINY_TTF
     #define LV_TINY_TTF_CACHE_GLYPH_CNT 256
+    #define LV_TINY_TTF_FILE_SUPPORT 1
 #endif
 
 /*==================
