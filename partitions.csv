@@ -1,4 +1,4 @@
-﻿# NEO Music —— 16MB Flash 分区表
+# NEO Music —— 16MB Flash 分区表
 # app 4MB：嵌入 1.5MB 中文字库 + 网易云 API/解码/UI 全量代码
 # storage 12MB：封面缓存与离线数据（U 盘 / 内部 Flash 均可挂）
 # Name,     Type, SubType, Offset,   Size,     Flags
