@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -216,9 +218,14 @@ int wifi_mgr_scan(wifi_ap_t *aps, int max)
     wifi_scan_config_t sc;
     memset(&sc, 0, sizeof(sc));
     sc.show_hidden = false;
+
+    /* esp_wifi_scan_stop() 是异步的，不停稳就立刻 start 会返回 NOT_STOPPED */
     esp_wifi_scan_stop();
-    if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
-        ESP_LOGW(TAG, "扫描启动失败");
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "扫描启动失败: %s", esp_err_to_name(err));
         return 0;
     }
 
