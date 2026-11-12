@@ -1,5 +1,5 @@
 /*
- * tft_display —— ST7789 240x240 IPS 实现
+ * tft_display —— ST7789 240x320 IPS 实现
  *
  * 文字：4bpp 抗锯齿字库（font_data.c），按行合成到缓冲再一次刷屏。
  */
@@ -25,20 +25,18 @@
 
 static const char *TAG = "tft";
 
-/* HW-678 引脚分配 */
+/* HW-678 引脚分配（排线丝印：GND 3V3 G21 G47 G45 G40 G41 G42） */
 #define PIN_SCLK  21    /* LCD SCL */
 #define PIN_MOSI  47    /* LCD SDA */
 #define PIN_RST   45    /* LCD RES */
 #define PIN_DC    40    /* LCD DC */
+#define PIN_CS    41    /* LCD CS  —— 真实引脚，不能写成 -1 */
 #define PIN_BL    42    /* LCD BLK */
 
 /* SPI 时钟。
- * 全屏 115KB：10MHz 要 90ms，40MHz 23ms，80MHz 11ms。
+ * 全屏 150KB：40MHz 约 31ms，80MHz 约 15ms。
  * 杜邦线能扛到多少是运气，花屏/黑屏就往下退：80 → 40 → 26 → 20。 */
 #define SPI_CLK_HZ  (80 * 1000 * 1000)
-
-/* 填充用的多行缓冲：一次传 32 行，比逐行发少 32 倍的传输开销 */
-#define FILL_ROWS   32
 
 static esp_lcd_panel_handle_t s_panel;
 static SemaphoreHandle_t      s_flush_done;
@@ -147,11 +145,11 @@ esp_err_t tft_init(void)
     }
 
     /* 整帧缓冲放在内部 RAM：SPI 的 DMA 只能直接访问内部 RAM（PSRAM 不具备 DMA 能力）。
-       240×240×2 = 115KB，ESP32-S3 的 512KB SRAM 可以容纳。 */
+       240×320×2 = 153600B ≈ 150KB，ESP32-S3 的 512KB SRAM 可以容纳。 */
     s_fb = heap_caps_malloc((size_t)TFT_WIDTH * TFT_HEIGHT * sizeof(uint16_t),
                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_fb) {
-        ESP_LOGE(TAG, "帧缓冲分配失败（需要 115KB 内部 RAM）");
+        ESP_LOGE(TAG, "帧缓冲分配失败（需要 150KB 内部 RAM）");
         return ESP_ERR_NO_MEM;
     }
     memset(s_fb, 0, (size_t)TFT_WIDTH * TFT_HEIGHT * sizeof(uint16_t));
@@ -167,10 +165,11 @@ esp_err_t tft_init(void)
     ESP_RETURN_ON_ERROR(spi_bus_initialize(SPI3_HOST, &bus, SPI_DMA_CH_AUTO),
                         TAG, "SPI3 初始化失败");
 
-    /* 注意 cs_gpio_num = -1：这块屏没有 CS 脚 */
+    /* 这块屏有独立 CS（GPIO41），必须由 panel io 拉片选；
+       写成 -1 时 SPI 总线上的数据不会被屏锁存，表现为黑屏或花屏。 */
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .dc_gpio_num       = PIN_DC,
-        .cs_gpio_num       = -1,
+        .cs_gpio_num       = PIN_CS,
         .pclk_hz           = SPI_CLK_HZ,
         .lcd_cmd_bits      = 8,
         .lcd_param_bits    = 8,
@@ -189,7 +188,8 @@ esp_err_t tft_init(void)
 
     esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = PIN_RST,
-        /* 本屏为 BGR 顺序：若改为 RGB，红色会显示成蓝色。 */
+        /* 本屏为 BGR 顺序（MADCTL 的 BGR 位 0x08）：若按 RGB 配，红蓝会整体对调。
+           esp_lcd 会把这个选项写进 MADCTL，后续的 mirror/swap_xy 只改方向位、不会抹掉它。 */
         .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,
         .bits_per_pixel = 16,
     };
@@ -209,7 +209,8 @@ esp_err_t tft_init(void)
 
     s_bl_on = true;
     apply_backlight();
-    ESP_LOGI(TAG, "ST7789 240x240 就绪（SPI3, %dMHz）", SPI_CLK_HZ / 1000000);
+    ESP_LOGI(TAG, "ST7789 240x320 就绪（SPI3, %dMHz, CS=GPIO%d）",
+             SPI_CLK_HZ / 1000000, PIN_CS);
     return ESP_OK;
 }
 
@@ -286,8 +287,8 @@ void tft_flush(void)
     s_dirty_y0 = TFT_HEIGHT;
     s_dirty_y1 = 0;
 
-    /* 115KB 的单次 DMA 传输在部分时序下不稳定，因此拆成两块发送；
-       80MHz 下每块约 6ms，视觉上仍是连续刷新。 */
+    /* 整帧 150KB 一次 DMA 在部分时序下不稳定，按 120 行一块发送；
+       320 行最多 3 块，80MHz 下每块约 7ms，视觉上仍是连续刷新。 */
     const int BLOCK = 120;
     for (int y = y0; y < y1; y += BLOCK) {
         int rows = (y + BLOCK <= y1) ? BLOCK : (y1 - y);

@@ -7,7 +7,8 @@
  *   接口    : 4-SPI
  *
  * HW-678 接线：
- *   SCL(GPIO21)  SDA(GPIO47)  RES(GPIO45)  DC(GPIO40)  BLK(GPIO42)
+ *   SCL(GPIO21)  SDA(GPIO47)  RES(GPIO45)  DC(GPIO40)
+ *   CS(GPIO41)   BLK(GPIO42)
  */
 #pragma once
 

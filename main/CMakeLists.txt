@@ -44,4 +44,6 @@ idf_component_register(
                  sdmmc
                  # I2S 音频输出
                  esp_driver_i2s
+                 # RST 长按重启（esp_restart）
+                 esp_system
 )

@@ -17,6 +17,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "font_data.h"
 #include "keys.h"
@@ -689,10 +690,10 @@ static void draw_orient(void)
     snprintf(buf, sizeof(buf), "方向 %d", s_orient + 1);
     tft_text((SCREEN_W - font_text_width(buf)) / 2, 110, buf, s_theme.accent, s_theme.bg);
 
-    const char *h = "按 ^ v 切换";
+    const char *h = "上下键切换方向";
     tft_text((SCREEN_W - font_text_width(h)) / 2, 146, h, s_theme.text2, s_theme.bg);
 
-    const char *h2 = "按 * 确认";
+    const char *h2 = "按 OK 键保存";
     tft_text((SCREEN_W - font_text_width(h2)) / 2, 176, h2, s_theme.text2, s_theme.bg);
 }
 
@@ -918,26 +919,51 @@ static void list_anim_tick(void)
     }
 }
 
+/*
+ * HW-678 7 键导航约定（无触摸屏）：
+ *   UP / DOWN / LEFT / RIGHT  移动焦点、切歌；长按连发，纵向连发调音量
+ *   OK                        确认 / 播放暂停；长按切播放模式
+ *   SET                       打开设置 / 返回；长按进选歌列表（菜单/列表内为方向校准）
+ *   RST                       长按 800ms 重启
+ */
 static void handle_key(key_event_t ev)
 {
+    /* RST 长按在任何界面都直接重启，不必在每个分支里重复处理 */
+    if (ev == KEY_RST_LONG) {
+        esp_restart();
+        return;
+    }
+
     switch (s_screen) {
     case SCR_ORIENT:
         switch (ev) {
         case KEY_UP:
+        case KEY_UP_REPEAT:
+        case KEY_LEFT:
+        case KEY_LEFT_REPEAT:
             s_orient = (s_orient + 3) % 4;
             tft_set_rotation(s_orient);
             redraw();
             break;
         case KEY_DOWN:
+        case KEY_DOWN_REPEAT:
+        case KEY_RIGHT:
+        case KEY_RIGHT_REPEAT:
             s_orient = (s_orient + 1) % 4;
             tft_set_rotation(s_orient);
             redraw();
             break;
-        case KEY_STAR:
+        case KEY_OK:
             g_set.rot = (uint8_t)s_orient;
             settings_save();
             s_boot_at = now_ms();
             switch_to(g_set.bootanim ? SCR_BOOT : SCR_PLAYER);
+            break;
+        case KEY_SET:
+            /* 放弃本次调整，恢复已保存的方向 */
+            s_orient = (g_set.rot <= 3) ? g_set.rot : 0;
+            tft_set_rotation(s_orient);
+            switch_to(SCR_PLAYER);
             break;
         default:
             break;
@@ -947,9 +973,11 @@ static void handle_key(key_event_t ev)
     case SCR_PLAYER:
         switch (ev) {
         case KEY_UP:
+        case KEY_LEFT:
             track_step(-1, true);
             break;
         case KEY_DOWN:
+        case KEY_RIGHT:
             track_step(1, true);
             break;
         case KEY_UP_REPEAT:
@@ -958,39 +986,38 @@ static void handle_key(key_event_t ev)
         case KEY_DOWN_REPEAT:
             vol_step(-5);
             break;
-        case KEY_STAR:
+        case KEY_LEFT_REPEAT:
+            track_step(-1, true);
+            break;
+        case KEY_RIGHT_REPEAT:
+            track_step(1, true);
+            break;
+        case KEY_OK:
             toggle_play();
             break;
-        case KEY_STAR_LONG:
+        case KEY_OK_LONG:
             cycle_mode();
             break;
-        case KEY_STAR_DOUBLE:
-            s_sel      = s_cur < 0 ? 0 : s_cur;
-            s_list_top = 0;
-            list_fix_top();
-            switch_to(SCR_LIST);
-            break;
-        case KEY_HASH_DOUBLE:
-            s_sel      = 0;
-            s_menu_hi  = 28;
-            s_menu_target = 28;
-            /* 进入菜单时将开关拨片直接同步到当前设置，不播放过渡动画 */
+        case KEY_SET:
+            /* 进菜单时把开关拨片直接同步到当前设置，不播放过渡动画 */
+            s_sel             = 0;
+            s_menu_hi         = 28;
+            s_menu_target     = 28;
             s_toggle_target[0] = g_set.online != 0;
             s_toggle_target[1] = g_set.dark != 0;
             s_toggle_target[2] = g_set.bootanim != 0;
             for (int i = 0; i < 3; i++) {
                 s_toggle_pos[i] = s_toggle_target[i] ? 1.0f : 0.0f;
             }
-            /* 菜单里用 * 调整选项，关掉它的双击，让每次按都立即生效 */
-            keys_set_double(BTN_STAR, false);
             s_last_wifi_st = (int)wifi_prov_state();
             switch_to(SCR_MENU);
             break;
-        case KEY_HASH_LONG:
-            /* 长按 # 重新调屏幕方向（换方向后画面转 90° 时用） */
-            s_orient = (g_set.rot <= 3) ? g_set.rot : 0;
-            tft_set_rotation(s_orient);
-            switch_to(SCR_ORIENT);
+        case KEY_SET_LONG:
+            /* 长按 SET 进选歌列表，光标落在当前播放的曲目上 */
+            s_sel      = s_cur < 0 ? 0 : s_cur;
+            s_list_top = 0;
+            list_fix_top();
+            switch_to(SCR_LIST);
             break;
         default:
             break;
@@ -1000,19 +1027,29 @@ static void handle_key(key_event_t ev)
     case SCR_MENU:
         switch (ev) {
         case KEY_UP:
+        case KEY_UP_REPEAT:
+        case KEY_LEFT:
+        case KEY_LEFT_REPEAT:
             menu_move(-1);
             break;
         case KEY_DOWN:
+        case KEY_DOWN_REPEAT:
+        case KEY_RIGHT:
+        case KEY_RIGHT_REPEAT:
             menu_move(1);
             break;
-        case KEY_STAR:
-            /* 菜单里 * = 调整当前项（取消双击后立即生效，连按不会退回播放器） */
+        case KEY_OK:
             menu_adjust();
             break;
-        case KEY_HASH_DOUBLE:
-            s_sel    = 0;
-            keys_set_double(BTN_STAR, true);   /* 回到播放界面恢复 * 的双击 */
+        case KEY_SET:
+            s_sel = 0;
             switch_to(SCR_PLAYER);
+            break;
+        case KEY_SET_LONG:
+            /* 长按 SET 重新校准屏幕方向 */
+            s_orient = (g_set.rot <= 3) ? g_set.rot : 0;
+            tft_set_rotation(s_orient);
+            switch_to(SCR_ORIENT);
             break;
         default:
             break;
@@ -1023,20 +1060,30 @@ static void handle_key(key_event_t ev)
         switch (ev) {
         case KEY_UP:
         case KEY_UP_REPEAT:
+        case KEY_LEFT:
+        case KEY_LEFT_REPEAT:
             list_move(-1);
             break;
         case KEY_DOWN:
         case KEY_DOWN_REPEAT:
+        case KEY_RIGHT:
+        case KEY_RIGHT_REPEAT:
             list_move(1);
             break;
-        case KEY_STAR:
+        case KEY_OK:
             if (s_count > 0) {
                 play_index(s_sel);
                 switch_to(SCR_PLAYER);
             }
             break;
-        case KEY_HASH_DOUBLE:
+        case KEY_SET:
             switch_to(SCR_PLAYER);
+            break;
+        case KEY_SET_LONG:
+            /* 列表里也允许长按 SET 直接调屏幕方向 */
+            s_orient = (g_set.rot <= 3) ? g_set.rot : 0;
+            tft_set_rotation(s_orient);
+            switch_to(SCR_ORIENT);
             break;
         default:
             break;
@@ -1167,7 +1214,7 @@ void ui_init(void)
         s_title_w = font_text_width(s_title);
     }
 
-    /* 方向已经定下来了，开机直接用存的值；要重调长按 # */
+    /* 方向已经定下来了，开机直接用存的值；在菜单/列表长按 SET 可重新校准 */
     tft_set_rotation(g_set.rot <= 3 ? g_set.rot : 0);
     s_screen = g_set.bootanim ? SCR_BOOT : SCR_PLAYER;
     s_boot_at       = now_ms();
