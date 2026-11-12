@@ -5,7 +5,8 @@ setlocal enabledelayedexpansion
 echo ========================================
 echo    ESP32-S3 Firmware Flash Tool
 echo ========================================
-echo.
+echo    固件: NEO Music (neo-music.bin, ESP-IDF 版)
+echo
 
 :: Scan for available COM ports
 echo Scanning available COM ports...
@@ -81,7 +82,7 @@ echo Baud Rate: 921600
 echo.
 
 :: Execute flashing
-"%~dp0esptool-windows-amd64\esptool.exe" --chip esp32s3 --port !selected_port! --baud 921600 --before default_reset --after hard_reset write_flash -z --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0 "%~dp0bin\bootloader.bin" 0x8000 "%~dp0bin\partitions.bin" 0x10000 "%~dp0bin\firmware.bin"
+"%~dp0esptool-windows-amd64\esptool.exe" --chip esp32s3 --port !selected_port! --baud 921600 --before default-reset --after hard-reset write-flash -z --flash-mode dio --flash-freq 80m --flash-size 16MB 0x0 "%~dp0bin\bootloader.bin" 0x8000 "%~dp0bin\partitions.bin" 0x10000 "%~dp0bin\neo-music.bin"
 
 if errorlevel 1 (
     echo.
