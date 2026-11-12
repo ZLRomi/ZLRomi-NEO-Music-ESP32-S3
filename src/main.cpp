@@ -11,7 +11,7 @@
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <WiFi.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 
 #include "types.h"
 #include "ui.h"
@@ -378,12 +378,12 @@ void setup() {
     Serial.println("\n=== ZLRomi NEO Music Player ===");
     Serial.println("[1] Starting...");
 
-    // 初始化SPIFFS（备用存储）
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[SPIFFS] Mount failed!");
+    // 初始化LittleFS（存储中文字体）
+    if (!LittleFS.begin(true)) {
+        Serial.println("[LittleFS] Mount failed!");
     } else {
-        Serial.printf("[SPIFFS] OK, total=%dKB used=%dKB\n",
-                      SPIFFS.totalBytes()/1024, SPIFFS.usedBytes()/1024);
+        Serial.printf("[LittleFS] OK, total=%dKB used=%dKB\n",
+                      LittleFS.totalBytes()/1024, LittleFS.usedBytes()/1024);
     }
 
     // 初始化USB Host MSC（U盘读取字体文件）

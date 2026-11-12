@@ -76,7 +76,7 @@ jobs:
     - name: Build firmware
       run: pio run -e esp32s3
       
-    - name: Build SPIFFS image
+    - name: Build LittleFS image
       run: pio run -t buildfs -e esp32s3
         
     - name: Upload artifacts
@@ -87,5 +87,5 @@ jobs:
           .pio/build/esp32s3/firmware.bin
           .pio/build/esp32s3/bootloader.bin
           .pio/build/esp32s3/partitions.bin
-          .pio/build/esp32s3/spiffs.bin
+          .pio/build/esp32s3/littlefs.bin
         retention-days: 30
