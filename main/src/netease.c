@@ -1,23 +1,64 @@
+/*
+ * netease.c —— 在线音乐数据源
+ *
+ * 主源是自建代理 netstartapi.zlromi.com（增强版 NeteaseCloudMusicApi，路径同官方）：
+ *   推荐歌单  GET  {B}/personalized
+ *   每日新歌  GET  {B}/personalized/newsong
+ *   榜单      GET  {B}/toplist
+ *   歌单曲目  GET  {B}/playlist/track/all?id={歌单ID}&limit={N}&offset={偏移}
+ *   搜索      GET  {B}/search?keywords={词}&limit=30&offset=0
+ *   歌词      GET  {B}/lyric?id={歌曲ID}
+ *
+ * 播放地址**必须走海棠**（用户明确要求，主源）：
+ *   POST https://musicserver.haitangw.cc/v1/music/resolve-url   （带 X-Qing-* HMAC-SHA256 签名）
+ *   备   POST https://qt.haitangw.net/v1/music/resolve-url
+ *   海棠两个网关都失败时才退到 {B}/song/url/v1，最后才用网易云官方外链。
+ *
+ * 兜底源（代理不可用时自动切换）：
+ *   榜单/榜单曲目  60s.viki.moe/v2/ncm-rank/{list|{id}}
+ *   搜索           music.163.com/api/search/get/web
+ *   歌词           api.vkeys.cn/v2/music/netease/lyric
+ *
+ * ⚠️ 原先用的 apis.netstart.cn 与 netease-cloud-music-wheat.vercel.app 在实测中
+ *    20 秒无响应 / TCP 连不上，已弃用。
+ */
 #include "netease.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "mbedtls/md.h"
+#include "nvs.h"
 
 static const char *TAG = "netease";
 
-#define API_ROOT          "https://apis.netstart.cn/music"
-#define URL_PERSONALIZED  "https://netease-cloud-music-wheat.vercel.app/personalized"
-#define URL_RESOLVE       "https://musicserver.haitangw.cc/v1/music/resolve-url"
-#define URL_RESOLVE_ALT   "https://qt.haitangw.net/v1/music/resolve-url"
-#define URL_LYRIC         "https://api.vkeys.cn/v2/music/netease/lyric?id=%lld"
-#define URL_LYRIC_FALLBACK "https://apis.netstart.cn/music/lyric?id=%lld"
-#define HTTP_BODY_MAX     (48 * 1024)
+#define PROXY      "https://netstartapi.zlromi.com"
+#define VIKI       "https://60s.viki.moe/v2/ncm-rank"
+#define NCM_SEARCH "https://music.163.com/api/search/get/web"
+#define VIKI_LYRIC "https://api.vkeys.cn/v2/music/netease/lyric"
+#define NCM_OUTER  "https://music.163.com/song/media/outer/url"
+
+#define HAI_GATEWAY     "https://musicserver.haitangw.cc/v1"
+#define HAI_GATEWAY_ALT "https://qt.haitangw.net/v1"
+#define HAI_PATH        "/v1/music/resolve-url"
+#define HAI_APP_ID      "qingmusic-android"
+#define HAI_SECRET      "qm-gw-7c1f4e9a2b8d5360e1a7c4f9b2d8036c"
+#define HAI_VERSION     "1.4.0"
+
+/* 这些站点前面挂 Cloudflare，没有浏览器 UA 会被判 403 / 1015 */
+static const char *UA_BROWSER =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36";
+
+#define BODY_MAX (96 * 1024)
 
 typedef struct {
     char  *buf;
@@ -26,13 +67,13 @@ typedef struct {
     bool   overflow;
 } body_t;
 
-static esp_err_t on_event(esp_http_client_event_t *e)
+static esp_err_t on_http_event(esp_http_client_event_t *e)
 {
     body_t *b = (body_t *)e->user_data;
     if (e->event_id == HTTP_EVENT_ON_DATA && b) {
-        if (b->len + e->data_len >= b->cap) {
-            size_t want = b->cap + e->data_len + 1024;
-            if (want > HTTP_BODY_MAX) {
+        if (b->len + e->data_len + 1 > b->cap) {
+            size_t want = b->cap + e->data_len + 2048;
+            if (want > BODY_MAX) {
                 b->overflow = true;
                 return ESP_FAIL;
             }
@@ -51,18 +92,79 @@ static esp_err_t on_event(esp_http_client_event_t *e)
     return ESP_OK;
 }
 
-static char *http_request(const char *url, const char *post_body)
+/**
+ * 发起请求并把响应体收进 malloc 的缓冲（调用者 free）。
+ * retry：网络层失败时额外重试几次（Cloudflare 偶发 429/1015 时有用）。
+ */
+static char *http_get(const char *url, const char *const *hdr_names,
+                      const char *const *hdr_values, int hdr_count,
+                      int timeout_ms, int retry)
 {
     body_t b = { .buf = malloc(4096), .len = 0, .cap = 4096, .overflow = false };
-    if (!b.buf) return NULL;
+    if (!b.buf) {
+        return NULL;
+    }
+    b.buf[0] = '\0';
+
+    char *result = NULL;
+    for (int attempt = 0; attempt <= retry; attempt++) {
+        b.len = 0;
+        b.buf[0] = '\0';
+        b.overflow = false;
+
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .method = HTTP_METHOD_GET,
+            .timeout_ms = timeout_ms,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .event_handler = on_http_event,
+            .user_data = &b,
+            .buffer_size = 4096,
+        };
+        esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+        if (!cli) {
+            continue;
+        }
+        esp_http_client_set_header(cli, "User-Agent", UA_BROWSER);
+        esp_http_client_set_header(cli, "Accept", "application/json");
+        for (int i = 0; i < hdr_count; i++) {
+            if (hdr_names[i] && hdr_values[i]) {
+                esp_http_client_set_header(cli, hdr_names[i], hdr_values[i]);
+            }
+        }
+        esp_err_t err = esp_http_client_perform(cli);
+        int status = esp_http_client_get_status_code(cli);
+        esp_http_client_cleanup(cli);
+
+        if (err == ESP_OK && status >= 200 && status < 300 && !b.overflow && b.len > 0) {
+            result = b.buf;
+            b.buf = NULL;
+            break;
+        }
+        ESP_LOGW(TAG, "请求失败 %s (err=%s status=%d)", url, esp_err_to_name(err), status);
+    }
+
+    free(b.buf);
+    return result;
+}
+
+/** POST JSON（海棠网关用） */
+static char *http_post_json(const char *url, const char *body,
+                            const char *const *hdr_names, const char *const *hdr_values,
+                            int hdr_count, int timeout_ms)
+{
+    body_t b = { .buf = malloc(4096), .len = 0, .cap = 4096, .overflow = false };
+    if (!b.buf) {
+        return NULL;
+    }
     b.buf[0] = '\0';
 
     esp_http_client_config_t cfg = {
         .url = url,
-        .method = post_body ? HTTP_METHOD_POST : HTTP_METHOD_GET,
-        .timeout_ms = 12000,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = timeout_ms,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .event_handler = on_event,
+        .event_handler = on_http_event,
         .user_data = &b,
         .buffer_size = 4096,
     };
@@ -71,26 +173,29 @@ static char *http_request(const char *url, const char *post_body)
         free(b.buf);
         return NULL;
     }
-    if (post_body) {
-        esp_http_client_set_post_field(cli, post_body, (int)strlen(post_body));
-        esp_http_client_set_header(cli, "Content-Type", "application/json");
+    esp_http_client_set_header(cli, "User-Agent", UA_BROWSER);
+    esp_http_client_set_header(cli, "Accept", "application/json");
+    esp_http_client_set_header(cli, "Content-Type", "application/json");
+    for (int i = 0; i < hdr_count; i++) {
+        if (hdr_names[i] && hdr_values[i]) {
+            esp_http_client_set_header(cli, hdr_names[i], hdr_values[i]);
+        }
     }
+    esp_http_client_set_post_field(cli, body, (int)strlen(body));
+
     esp_err_t err = esp_http_client_perform(cli);
     int status = esp_http_client_get_status_code(cli);
     esp_http_client_cleanup(cli);
 
     if (err != ESP_OK || status < 200 || status >= 300 || b.overflow || b.len == 0) {
-        ESP_LOGW(TAG, "请求失败 %s (err=%s, status=%d)", url, esp_err_to_name(err), status);
+        ESP_LOGW(TAG, "POST 失败 %s (err=%s status=%d)", url, esp_err_to_name(err), status);
         free(b.buf);
         return NULL;
     }
-    return b.buf;   /* 调用者 free */
+    return b.buf;
 }
 
-static char *http_get(const char *url)
-{
-    return http_request(url, NULL);
-}
+/* ---------------- 小工具 ---------------- */
 
 static void copy_str(char *dst, size_t cap, const char *src)
 {
@@ -119,143 +224,482 @@ static double num_of(const cJSON *obj, const char *name)
     return cJSON_IsNumber(v) ? v->valuedouble : 0;
 }
 
-/** 从各种返回格式里找到真正的数组：result / data / songs / playlists / recommend */
-static const cJSON *find_array(const cJSON *root, const char *inner)
-{
-    if (cJSON_IsArray(root)) return root;
-    const char *keys[] = { "result", "data", "songs", "playlists", "recommend", "list" };
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-        const cJSON *v = field(root, keys[i]);
-        if (!v) continue;
-        if (cJSON_IsArray(v)) return v;
-        if (inner) {
-            const cJSON *n = field(v, inner);
-            if (cJSON_IsArray(n)) return n;
-        }
-        const cJSON *n2 = field(v, "songs");
-        if (cJSON_IsArray(n2)) return n2;
-    }
-    return NULL;
-}
-
-/** 封面字段各家不同：picUrl / coverImgUrl / pic / imgurl / cover */
-static const char *cover_of(const cJSON *obj)
-{
-    const char *names[] = { "picUrl", "coverImgUrl", "cover", "pic", "imgurl", "img" };
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        const char *s = str_of(obj, names[i]);
-        if (s && *s) return s;
-    }
-    const cJSON *al = field(obj, "album");
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        const char *s = str_of(al, names[i]);
-        if (s && *s) return s;
-    }
-    const cJSON *al2 = field(obj, "al");
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        const char *s = str_of(al2, names[i]);
-        if (s && *s) return s;
-    }
-    return NULL;
-}
-
+/** 歌手：官方/代理用 artists[] 或 ar[]，60s 榜单用 artist[]，还有字符串形态 */
 static const char *artist_of(const cJSON *obj)
 {
-    const cJSON *ar = field(obj, "artists");
-    if (!cJSON_IsArray(ar)) ar = field(obj, "ar");
-    if (cJSON_IsArray(ar) && cJSON_GetArraySize(ar) > 0) {
-        const char *n = str_of(cJSON_GetArrayItem(ar, 0), "name");
-        if (n) return n;
+    static const char *arr_keys[] = { "artists", "ar", "artist" };
+    for (int k = 0; k < 3; k++) {
+        const cJSON *a = field(obj, arr_keys[k]);
+        if (cJSON_IsArray(a) && cJSON_GetArraySize(a) > 0) {
+            const cJSON *f = cJSON_GetArrayItem(a, 0);
+            const char *n = cJSON_IsString(f) ? f->valuestring : str_of(f, "name");
+            if (n && *n) {
+                return n;
+            }
+        }
     }
-    const char *keys[] = { "artist", "author", "singer" };
-    for (size_t i = 0; i < 3; i++) {
-        const char *s = str_of(obj, keys[i]);
-        if (s) return s;
+    static const char *str_keys[] = { "artist", "singer", "author" };
+    for (int k = 0; k < 3; k++) {
+        const char *s = str_of(obj, str_keys[k]);
+        if (s && *s) {
+            return s;
+        }
     }
     return "未知歌手";
 }
 
+/** 封面：album.picUrl / album.cover / coverImgUrl / picUrl ... */
+static const char *cover_of(const cJSON *obj)
+{
+    static const char *keys[] = { "picUrl", "coverImgUrl", "cover", "pic", "imgurl", "img" };
+    for (int k = 0; k < 6; k++) {
+        const char *s = str_of(obj, keys[k]);
+        if (s && *s) {
+            return s;
+        }
+    }
+    const cJSON *al = field(obj, "album");
+    if (!al) {
+        al = field(obj, "al");
+    }
+    if (al) {
+        for (int k = 0; k < 6; k++) {
+            const char *s = str_of(al, keys[k]);
+            if (s && *s) {
+                return s;
+            }
+        }
+    }
+    const cJSON *ar = field(obj, "artist");
+    if (cJSON_IsArray(ar) && cJSON_GetArraySize(ar) > 0) {
+        const cJSON *f = cJSON_GetArrayItem(ar, 0);
+        for (int k = 0; k < 6; k++) {
+            const char *s = str_of(f, keys[k]);
+            if (s && *s) {
+                return s;
+            }
+        }
+    }
+    return NULL;
+}
+
+/** 一首歌 → song_t，兼容代理格式（name/ar/dt/al.picUrl）与 60s 格式（title/artist/album.cover） */
 static void parse_song(const cJSON *item, song_t *s)
 {
     memset(s, 0, sizeof(*s));
-    const cJSON *inner = field(item, "song");
-    const cJSON *o = cJSON_IsObject(inner) ? inner : item;
+    s->id = (int64_t)num_of(item, "id");
 
-    s->id = (int64_t)num_of(o, "id");
-    copy_str(s->name, sizeof(s->name), str_of(o, "name") ? str_of(o, "name") : "未命名");
-    copy_str(s->artist, sizeof(s->artist), artist_of(o));
-    const char *cv = cover_of(o);
-    if (cv) copy_str(s->cover, sizeof(s->cover), cv);
-    s->duration_ms = (int)num_of(o, "duration");
-    if (s->duration_ms == 0) s->duration_ms = (int)num_of(o, "dt");
+    const char *nm = str_of(item, "name");
+    if (!nm) {
+        nm = str_of(item, "title");
+    }
+    copy_str(s->name, sizeof(s->name), nm ? nm : "未命名");
+
+    copy_str(s->artist, sizeof(s->artist), artist_of(item));
+
+    const char *cv = cover_of(item);
+    if (cv) {
+        copy_str(s->cover, sizeof(s->cover), cv);
+    }
+
+    s->duration_ms = (int)num_of(item, "duration");
+    if (s->duration_ms == 0) {
+        s->duration_ms = (int)num_of(item, "dt");
+    }
 }
 
-static bool parse_songs(const char *json, song_list_t *out, const char *inner)
+/* ---------------- 海棠签名（播放地址备选源用） ---------------- */
+
+static void hex_of(const uint8_t *in, size_t len, char *out)
+{
+    static const char *H = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2]     = H[in[i] >> 4];
+        out[i * 2 + 1] = H[in[i] & 15];
+    }
+    out[len * 2] = '\0';
+}
+
+/**
+ * SHA-256 → hex。
+ * 统一走 mbedtls_md，不直接用 mbedtls_sha256_*：
+ * 后者在 mbedtls 2.x 是 starts(ctx)，3.x 是 starts(ctx, is224)，
+ * 类型名也从 mbedtls_sha256_context 变过，跨 IDF 版本容易炸。
+ */
+static void sha256_hex(const char *msg, char *out65)
+{
+    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!md) {
+        out65[0] = '\0';
+        return;
+    }
+    uint8_t d[32] = { 0 };
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    if (mbedtls_md_setup(&ctx, md, 0) == 0 &&
+        mbedtls_md_starts(&ctx) == 0 &&
+        mbedtls_md_update(&ctx, (const uint8_t *)msg, strlen(msg)) == 0 &&
+        mbedtls_md_finish(&ctx, d) == 0) {
+        hex_of(d, sizeof(d), out65);
+    } else {
+        out65[0] = '\0';
+    }
+    mbedtls_md_free(&ctx);
+}
+
+static void hmac_sha256_hex(const char *key, const char *msg, char *out65)
+{
+    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!md) {
+        out65[0] = '\0';
+        return;
+    }
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    uint8_t mac[32];
+    int r = mbedtls_md_setup(&ctx, md, 0);
+    if (r == 0) {
+        r = mbedtls_md_hmac_starts(&ctx, (const uint8_t *)key, strlen(key));
+    }
+    if (r == 0) {
+        r = mbedtls_md_hmac_update(&ctx, (const uint8_t *)msg, strlen(msg));
+    }
+    if (r == 0) {
+        r = mbedtls_md_hmac_finish(&ctx, mac);
+    }
+    mbedtls_md_free(&ctx);
+    if (r != 0) {
+        out65[0] = '\0';
+        return;
+    }
+    hex_of(mac, sizeof(mac), out65);
+}
+
+/** 设备标识要稳定；单独存 NVS 的 hid 键，不动 settings 结构体（免得把已存的 WiFi 弄丢） */
+static const char *hai_device_id(void)
+{
+    static char id[40];
+    if (id[0]) {
+        return id;
+    }
+    nvs_handle_t h;
+    if (nvs_open("neo", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(id);
+        if (nvs_get_str(h, "hid", id, &len) == ESP_OK && id[0]) {
+            nvs_close(h);
+            return id;
+        }
+        nvs_close(h);
+    }
+    snprintf(id, sizeof(id), "qingmusic-android-%08x%08x",
+             (unsigned)esp_random(), (unsigned)esp_random());
+    if (nvs_open("neo", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, "hid", id);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    return id;
+}
+
+/**
+ * 海棠网关需要的 6 个签名头。
+ *
+ * ⚠️ 存储必须由调用方提供（不能用函数内的局部数组），否则函数返回后
+ *    这些指针全部悬空，HTTP 层拿到的就是被覆盖的垃圾，签名必然校验失败。
+ */
+typedef struct {
+    char app_id[32];     /* 正好等于 HAI_APP_ID，留点余量 */
+    char version[16];
+    char device[48];
+    char ts[24];
+    char nonce[40];
+    char sign[80];
+} hai_hdr_t;
+
+/**
+ * 当前 Unix 毫秒时间戳。
+ *
+ * 服务端签的是 Date.now()，不能用 esp_timer_get_time()（那是开机后毫秒数，
+ * 2026 年的设备会得到几千，服务端必然判 ts 非法）。
+ * 系统时间在 SNTP 对时前是 1970 年，所以这里加一道守卫：
+ * 时间小于 2020-01-01 时视为未对时，回落到「开机毫秒 + 上次对时基准」。
+ */
+static int64_t now_ms(void)
+{
+    time_t sec = 0;
+    struct timeval tv = { 0 };
+    if (gettimeofday(&tv, NULL) == 0) {
+        sec = tv.tv_sec;
+    }
+    /* 1577836800 = 2020-01-01 00:00:00 UTC */
+    if (sec > 1577836800) {
+        return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
+    /* 未对时：至少给出单调递增且形态合理的值，避免 0 或负数 */
+    return 1577836800000LL + esp_timer_get_time() / 1000;
+}
+
+/**
+ * 生成海棠签名头：
+ *   message = APP_ID \n ts \n nonce \n METHOD \n path \n sha256(body)
+ *   sign    = HMAC-SHA256(message, SECRET)
+ */
+static void build_hai_headers(const char *method, const char *path, const char *body,
+                              hai_hdr_t *h)
+{
+    copy_str(h->app_id, sizeof(h->app_id), HAI_APP_ID);
+    copy_str(h->version, sizeof(h->version), HAI_VERSION);
+    copy_str(h->device, sizeof(h->device), hai_device_id());
+
+    snprintf(h->ts, sizeof(h->ts), "%lld", (long long)now_ms());
+
+    uint8_t rnd[16];
+    for (int i = 0; i < 16; i++) {
+        rnd[i] = (uint8_t)(esp_random() & 0xFF);
+    }
+    hex_of(rnd, sizeof(rnd), h->nonce);
+
+    char bh[65];
+    sha256_hex(body ? body : "", bh);
+
+    char msg[512];
+    snprintf(msg, sizeof(msg), "%s\n%s\n%s\n%s\n%s\n%s",
+             HAI_APP_ID, h->ts, h->nonce, method, path, bh);
+    hmac_sha256_hex(HAI_SECRET, msg, h->sign);
+}
+
+/* ---------------- 对外接口 ---------------- */
+
+/* ---------------- 歌单解析（三种形态共用） ---------------- */
+
+/**
+ * 从数组里解析歌单。兼容：
+ *   代理 /personalized → { result: [ {id,name,picUrl, copywriter} ] }
+ *   代理 /toplist      → { list:   [ {id,name,coverImgUrl,description} ] }
+ *   60s 榜单           → { data:   [ {id,name,cover,description} ] }
+ */
+static int parse_playlists(const cJSON *arr, playlist_list_t *out)
 {
     out->count = 0;
-    cJSON *root = cJSON_Parse(json);
-    if (!root) return false;
-    const cJSON *arr = find_array(root, inner);
-    if (!arr) {
-        cJSON_Delete(root);
-        return false;
+    if (!cJSON_IsArray(arr)) {
+        return 0;
+    }
+    int n = cJSON_GetArraySize(arr);
+    for (int i = 0; i < n && out->count < PLAYLIST_MAX; i++) {
+        const cJSON *it = cJSON_GetArrayItem(arr, i);
+        if (!cJSON_IsObject(it)) {
+            continue;
+        }
+        playlist_t *p = &out->items[out->count];
+        memset(p, 0, sizeof(*p));
+        p->id = (int64_t)num_of(it, "id");
+
+        const char *nm = str_of(it, "name");
+        copy_str(p->name, sizeof(p->name), nm ? nm : "未命名歌单");
+
+        const char *ds = str_of(it, "description");
+        if (!ds) {
+            ds = str_of(it, "copywriter");
+        }
+        if (ds) {
+            copy_str(p->desc, sizeof(p->desc), ds);
+        }
+
+        const char *cv = cover_of(it);
+        if (cv) {
+            copy_str(p->cover, sizeof(p->cover), cv);
+        }
+        if (p->id != 0 && p->name[0]) {
+            out->count++;
+        }
+    }
+    return out->count;
+}
+
+/** 把一首歌解析进列表（带 id 过滤） */
+static int parse_songs(const cJSON *arr, song_list_t *out)
+{
+    out->count = 0;
+    if (!cJSON_IsArray(arr)) {
+        return 0;
     }
     int n = cJSON_GetArraySize(arr);
     for (int i = 0; i < n && out->count < SONG_MAX; i++) {
         const cJSON *it = cJSON_GetArrayItem(arr, i);
-        if (!cJSON_IsObject(it)) continue;
+        if (!cJSON_IsObject(it)) {
+            continue;
+        }
         song_t *s = &out->items[out->count];
         parse_song(it, s);
-        if (s->id != 0) out->count++;
+        if (s->id != 0) {
+            out->count++;
+        }
     }
+    return out->count;
+}
+
+/* ---------------- 对外接口：列表类 ---------------- */
+
+/* netease_daily 的兜底会用到，先声明 */
+bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out);
+
+/** 通用：从一个 URL 取 JSON 并挑一个数组字段解析歌单 */
+static int fetch_playlists(const char *url, const char *key, playlist_list_t *out,
+                           int timeout_ms)
+{
+    char *json = http_get(url, NULL, NULL, 0, timeout_ms, 1);
+    if (!json) {
+        return 0;
+    }
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        return 0;
+    }
+    int got = parse_playlists(field(root, key), out);
     cJSON_Delete(root);
-    return out->count > 0;
+    return got;
 }
 
 bool netease_playlists(playlist_list_t *out)
 {
     out->count = 0;
-    char *json = http_get(URL_PERSONALIZED);
-    if (!json) return false;
+    char url[160];
 
-    cJSON *root = cJSON_Parse(json);
-    free(json);
-    if (!root) return false;
-    const cJSON *arr = find_array(root, NULL);
-    if (!arr) {
-        cJSON_Delete(root);
-        return false;
+    /* 主源：代理推荐歌单 */
+    snprintf(url, sizeof(url), "%s/personalized", PROXY);
+    if (fetch_playlists(url, "result", out, 15000) > 0) {
+        ESP_LOGI(TAG, "推荐歌单 %d 个", out->count);
+        return true;
     }
-    int n = cJSON_GetArraySize(arr);
-    for (int i = 0; i < n && out->count < PLAYLIST_MAX; i++) {
-        const cJSON *it = cJSON_GetArrayItem(arr, i);
-        if (!cJSON_IsObject(it)) continue;
-        playlist_t *p = &out->items[out->count];
-        memset(p, 0, sizeof(*p));
-        p->id = (int64_t)num_of(it, "id");
-        copy_str(p->name, sizeof(p->name), str_of(it, "name") ? str_of(it, "name") : "推荐歌单");
-        const char *cv = cover_of(it);
-        if (cv) copy_str(p->cover, sizeof(p->cover), cv);
-        if (p->id != 0) out->count++;
+
+    /* 兜底：60s 榜单当歌单用 */
+    snprintf(url, sizeof(url), "%s/list", VIKI);
+    if (fetch_playlists(url, "data", out, 15000) > 0) {
+        ESP_LOGW(TAG, "推荐歌单不可用，改用榜单 %d 个", out->count);
+        return true;
     }
-    cJSON_Delete(root);
-    return out->count > 0;
+    ESP_LOGE(TAG, "推荐歌单获取失败");
+    return false;
+}
+
+bool netease_ranks(playlist_list_t *out)
+{
+    out->count = 0;
+    char url[160];
+
+    /* 主源：代理榜单 */
+    snprintf(url, sizeof(url), "%s/toplist", PROXY);
+    if (fetch_playlists(url, "list", out, 15000) > 0) {
+        ESP_LOGI(TAG, "榜单 %d 个", out->count);
+        return true;
+    }
+
+    /* 兜底：60s 榜单列表 */
+    snprintf(url, sizeof(url), "%s/list", VIKI);
+    if (fetch_playlists(url, "data", out, 15000) > 0) {
+        ESP_LOGW(TAG, "代理榜单不可用，改用 60s 榜单 %d 个", out->count);
+        return true;
+    }
+    ESP_LOGE(TAG, "榜单获取失败");
+    return false;
 }
 
 bool netease_daily(song_list_t *out)
 {
-    char url[160];
-    snprintf(url, sizeof(url), "%s/personalized/newsong", API_ROOT);
-    char *json = http_get(url);
-    if (!json) return false;
-    bool ok = parse_songs(json, out, "songs");
-    free(json);
-    return ok;
+    out->count = 0;
+    char url[192];
+
+    /* 主源：代理每日新歌 */
+    snprintf(url, sizeof(url), "%s/personalized/newsong", PROXY);
+    char *json = http_get(url, NULL, NULL, 0, 15000, 1);
+    if (json) {
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            /* /personalized/newsong 的字段是 result[]，每项里还有一层 song */
+            const cJSON *arr = field(root, "result");
+            if (cJSON_IsArray(arr)) {
+                int n = cJSON_GetArraySize(arr);
+                for (int i = 0; i < n && out->count < SONG_MAX; i++) {
+                    const cJSON *it = cJSON_GetArrayItem(arr, i);
+                    if (!cJSON_IsObject(it)) {
+                        continue;
+                    }
+                    /* 有 song 子对象时用它（完整字段），否则用本体 */
+                    const cJSON *real = field(it, "song");
+                    if (!cJSON_IsObject(real)) {
+                        real = it;
+                    }
+                    song_t *s = &out->items[out->count];
+                    parse_song(real, s);
+                    if (s->id != 0) {
+                        out->count++;
+                    }
+                }
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    /* 兜底：热门榜曲目（19723756 = 飙升榜） */
+    if (out->count == 0) {
+        ESP_LOGW(TAG, "每日新歌不可用，退到飙升榜");
+        return netease_playlist_tracks(19723756, out);
+    }
+    ESP_LOGI(TAG, "每日新歌 %d 首", out->count);
+    return true;
+}
+
+bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out)
+{
+    out->count = 0;
+    char url[192];
+
+    /* 主源：代理歌单曲目 */
+    snprintf(url, sizeof(url), "%s/playlist/track/all?id=%lld&limit=%d&offset=0",
+             PROXY, (long long)playlist_id, SONG_MAX);
+    char *json = http_get(url, NULL, NULL, 0, 20000, 1);
+    if (json) {
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            parse_songs(field(root, "songs"), out);
+            cJSON_Delete(root);
+        }
+    }
+
+    /* 兜底：60s 榜单曲目 */
+    if (out->count == 0) {
+        snprintf(url, sizeof(url), "%s/%lld", VIKI, (long long)playlist_id);
+        json = http_get(url, NULL, NULL, 0, 20000, 1);
+        if (json) {
+            cJSON *root = cJSON_Parse(json);
+            free(json);
+            if (root) {
+                parse_songs(field(root, "data"), out);
+                cJSON_Delete(root);
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "歌单 %lld 取到 %d 首", (long long)playlist_id, out->count);
+    return out->count > 0;
+}
+
+bool netease_rank_songs(int64_t rank_id, song_list_t *out)
+{
+    return netease_playlist_tracks(rank_id, out);
 }
 
 bool netease_search(const char *keyword, int offset, song_list_t *out)
 {
-    /* 中文关键词必须 URL 编码，否则 HTTPS 会 400 */
+    out->count = 0;
+    if (!keyword || !*keyword) {
+        return false;
+    }
+
+    /* 中文关键词必须 URL 编码 */
     char enc[256] = "";
     size_t n = 0;
     for (const unsigned char *p = (const unsigned char *)keyword; *p && n + 3 < sizeof(enc); p++) {
@@ -269,106 +713,185 @@ bool netease_search(const char *keyword, int offset, song_list_t *out)
     enc[n] = '\0';
 
     char url[512];
-    snprintf(url, sizeof(url), "%s/cloudsearch?keywords=%s&limit=%d&offset=%d",
-             API_ROOT, enc, SONG_MAX, offset);
-    char *json = http_get(url);
-    if (!json) return false;
-    bool ok = parse_songs(json, out, "songs");
-    free(json);
-    return ok;
-}
+    /* 主源：代理 /search */
+    snprintf(url, sizeof(url), "%s/search?keywords=%s&limit=30&offset=%d",
+             PROXY, enc, offset);
+    char *json = http_get(url, NULL, NULL, 0, 15000, 1);
 
-bool netease_playlist_tracks(int64_t pid, song_list_t *out)
-{
-    char url[256];
-    snprintf(url, sizeof(url), "%s/playlist/track/all?id=%lld&limit=100&offset=0",
-             API_ROOT, (long long)pid);
-    char *json = http_get(url);
-    if (!json) return false;
-    bool ok = parse_songs(json, out, "songs");
-    free(json);
-    return ok;
-}
+    /* 兜底：网易云官方 Web 搜索 */
+    if (!json) {
+        snprintf(url, sizeof(url), "%s?csrf_token=&s=%s&type=1&offset=%d&total=true&limit=30",
+                 NCM_SEARCH, enc, offset);
+        json = http_get(url, NULL, NULL, 0, 15000, 1);
+    }
+    if (!json) {
+        return false;
+    }
 
-bool netease_song_detail(int64_t id, song_t *out)
-{
-    char url[160];
-    snprintf(url, sizeof(url), "%s/song/detail?ids=%lld", API_ROOT, (long long)id);
-    char *json = http_get(url);
-    if (!json) return false;
     cJSON *root = cJSON_Parse(json);
     free(json);
-    if (!root) return false;
-    const cJSON *arr = find_array(root, "songs");
-    memset(out, 0, sizeof(*out));
+    if (!root) {
+        return false;
+    }
+
+    const cJSON *songs = NULL;
+    const cJSON *result = field(root, "result");
+    if (result) {
+        songs = field(result, "songs");
+    }
+    if (!songs) {
+        songs = field(root, "songs");
+    }
+    if (!cJSON_IsArray(songs)) {
+        cJSON_Delete(root);
+        return false;
+    }
+    int cnt = cJSON_GetArraySize(songs);
+    for (int i = 0; i < cnt && out->count < SONG_MAX; i++) {
+        const cJSON *it = cJSON_GetArrayItem(songs, i);
+        if (!cJSON_IsObject(it)) continue;
+        song_t *s = &out->items[out->count];
+        parse_song(it, s);
+        if (s->id != 0) out->count++;
+    }
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "搜索 %s 得到 %d 首", keyword, out->count);
+    return out->count > 0;
+}
+
+bool netease_lyric(int64_t id, char *out, size_t cap)
+{
+    char url[192];
+    snprintf(url, sizeof(url), "%s/lyric?id=%lld", PROXY, (long long)id);
+    char *json = http_get(url, NULL, NULL, 0, 15000, 1);
+    if (!json) {
+        /* 兜底：vkeys 逐字歌词源 */
+        snprintf(url, sizeof(url), "%s?id=%lld", VIKI_LYRIC, (long long)id);
+        json = http_get(url, NULL, NULL, 0, 15000, 1);
+    }
+    if (!json) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        return false;
+    }
+
+    const char *lrc = NULL;
+    const cJSON *lo = field(root, "lrc");
+    if (lo) {
+        lrc = str_of(lo, "lyric");       /* 代理形态：lrc.lyric */
+    }
+    if (!lrc) {
+        const cJSON *data = field(root, "data");
+        lrc = str_of(data, "lrc");        /* vkeys 形态：data.lrc */
+        if (!lrc) {
+            lrc = str_of(data, "lyric");
+        }
+    }
     bool ok = false;
-    if (arr && cJSON_GetArraySize(arr) > 0) {
-        parse_song(cJSON_GetArrayItem(arr, 0), out);
-        ok = out->id != 0;
+    if (lrc && *lrc) {
+        copy_str(out, cap, lrc);
+        ok = true;
     }
     cJSON_Delete(root);
     return ok;
 }
 
+/**
+ * 取播放地址。
+ *
+ * **播放必须走海棠**（用户明确要求）：先走海棠网关，带完整 X-Qing-* 签名。
+ * 海棠两个网关都失败时才退到自建代理 /song/url/v1，最后才用官方外链。
+ * 这样高音质与会员曲目的可用性都以海棠为准，代理只做兜底。
+ */
 bool netease_resolve_url(int64_t id, int quality, char *url, size_t cap)
 {
-    const char *qname = quality == 2 ? "lossless" : (quality == 1 ? "exhigh" : "standard");
+    static const char *levels[3] = { "standard", "exhigh", "lossless" };
+    const char *level = levels[(quality < 0 || quality > 2) ? 0 : quality];
+
+    /* ---------- 主源：海棠网关 ---------- */
     char body[160];
-    snprintf(body, sizeof(body), "{\"id\":%lld,\"quality\":\"%s\"}", (long long)id, qname);
+    snprintf(body, sizeof(body), "{\"source\":\"wy\",\"rid\":\"%lld\",\"level\":\"%s\"}",
+             (long long)id, level);
 
-    const char *hosts[] = { URL_RESOLVE, URL_RESOLVE_ALT };
-    for (int i = 0; i < 2; i++) {
-        char *json = http_request(hosts[i], body);
-        if (!json) continue;
-        cJSON *root = cJSON_Parse(json);
-        free(json);
-        if (!root) continue;
+    static const char *gateways[2] = { HAI_GATEWAY, HAI_GATEWAY_ALT };
+    for (int g = 0; g < 2; g++) {
+        char gu[160];
+        snprintf(gu, sizeof(gu), "%s/music/resolve-url", gateways[g]);
 
-        const cJSON *data = field(root, "data");
-        const cJSON *u = NULL;
-        if (cJSON_IsObject(data)) u = field(data, "url");
-        if (!u) u = field(root, "url");
-        if (!u && cJSON_IsString(data)) u = data;
+        hai_hdr_t h;
+        build_hai_headers("POST", HAI_PATH, body, &h);
+
+        /* 必须与 http_post_json 的 const char *const * 类型一致，否则 -Werror 会报
+           指针限定符不兼容（char** → const char* const* 不是合法的隐式转换） */
+        char *names[6] = {
+            (char *)"X-Qing-App-Id", (char *)"X-Qing-App-Version",
+            (char *)"X-Qing-Device-Id", (char *)"X-Qing-Ts",
+            (char *)"X-Qing-Nonce", (char *)"X-Qing-Sign",
+        };
+        char *values[6] = {
+            h.app_id, h.version, h.device, h.ts, h.nonce, h.sign,
+        };
+
+        char *rj = http_post_json(gu, body, (const char *const *)names,
+                                  (const char *const *)values, 6, 15000);
+        if (!rj) {
+            continue;                      /* 网络层失败 → 换备用网关 */
+        }
+        cJSON *root = cJSON_Parse(rj);
+        free(rj);
         bool ok = false;
-        if (cJSON_IsString(u) && u->valuestring && strncmp(u->valuestring, "http", 4) == 0) {
-            copy_str(url, cap, u->valuestring);
-            ok = true;
-        }
-        cJSON_Delete(root);
-        if (ok) return true;
-    }
-    return false;
-}
-
-bool netease_lyric(int64_t id, char *out, size_t cap)
-{
-    char u1[192], u2[192];
-    snprintf(u1, sizeof(u1), URL_LYRIC, (long long)id);
-    snprintf(u2, sizeof(u2), URL_LYRIC_FALLBACK, (long long)id);
-    const char *urls[] = { u1, u2 };
-
-    for (int i = 0; i < 2; i++) {
-        char *json = http_get(urls[i]);
-        if (!json) continue;
-        cJSON *root = cJSON_Parse(json);
-        free(json);
-        if (!root) continue;
-
-        const char *lrc = NULL;
-        const cJSON *l = field(root, "lrc");
-        if (cJSON_IsObject(l)) lrc = str_of(l, "lyric");
-        if (!lrc) {
-            const cJSON *d = field(root, "data");
-            if (cJSON_IsObject(d)) lrc = str_of(d, "lyric");
-            if (!lrc && cJSON_IsString(d)) lrc = d->valuestring;
-        }
-        if (!lrc) lrc = str_of(root, "lyric");
-        if (lrc && *lrc) {
-            copy_str(out, cap, lrc);
+        if (root) {
+            /* 成功时 code 是数字 0；失败时是字符串错误码（如 APP_UPGRADE_REQUIRED） */
+            const cJSON *code = field(root, "code");
+            bool code_ok = cJSON_IsNumber(code) && code->valueint == 0;
+            const cJSON *data = field(root, "data");
+            const char *u = str_of(data, "url");
+            if (code_ok && u && strncmp(u, "http", 4) == 0) {
+                copy_str(url, cap, u);
+                ok = true;
+            } else {
+                const char *reason = str_of(root, "reason");
+                if (!reason) {
+                    reason = str_of(root, "message");
+                }
+                ESP_LOGW(TAG, "海棠拒绝(%s): %s", gateways[g], reason ? reason : "未知");
+            }
             cJSON_Delete(root);
+        }
+        if (ok) {
+            ESP_LOGI(TAG, "海棠取址成功 id=%lld level=%s", (long long)id, level);
             return true;
         }
-        cJSON_Delete(root);
     }
-    return false;
+
+    /* ---------- 兜底一：自建代理 /song/url/v1 ---------- */
+    char api[192];
+    snprintf(api, sizeof(api), "%s/song/url/v1?id=%lld&level=%s",
+             PROXY, (long long)id, level);
+    char *json = http_get(api, NULL, NULL, 0, 15000, 1);
+    if (json) {
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            const cJSON *data = field(root, "data");
+            const cJSON *first = cJSON_IsArray(data) ? cJSON_GetArrayItem(data, 0) : NULL;
+            const char *u = str_of(first, "url");
+            if (u && strncmp(u, "http", 4) == 0) {
+                copy_str(url, cap, u);
+                cJSON_Delete(root);
+                ESP_LOGW(TAG, "海棠不可用，已退到自建代理取址");
+                return true;
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    /* ---------- 兜底二：网易云官方外链（302 直跳 CDN） ---------- */
+    snprintf(url, cap, "%s?id=%lld.mp3", NCM_OUTER, (long long)id);
+    ESP_LOGW(TAG, "海棠与代理都失败，走官方外链兜底");
+    return true;
 }

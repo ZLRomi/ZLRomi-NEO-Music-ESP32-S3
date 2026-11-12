@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "lwip/ip4_addr.h"
 #include "settings.h"
@@ -49,6 +50,31 @@ static const char *PAGE =
     "<input name=\"p\" type=\"password\" placeholder=\"密码\" maxlength=\"64\">"
     "<button type=\"submit\">保存并连接</button></form></body></html>";
 
+/**
+ * 联网后对时。
+ *
+ * 海棠网关用 Date.now() 做签名时间戳，设备系统时间若停在 1970 年，
+ * 服务端会判 ts 非法 → 签名失败 → 播放地址取不到。所以拿到 IP 就同步时间。
+ * 失败只记日志，不影响其它功能。
+ */
+static void start_sntp(void)
+{
+    static bool started;
+    if (started) {
+        return;
+    }
+    started = true;
+
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    cfg.start = true;
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SNTP 启动失败: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "SNTP 已启动（ntp.aliyun.com）");
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -68,6 +94,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
         s_state = WIFI_CONNECTED;
         s_retry = 0;
+        start_sntp();                     /* 海棠签名需要真实时间 */
         if (s_connected_cb) {
             s_connected_cb();
         }

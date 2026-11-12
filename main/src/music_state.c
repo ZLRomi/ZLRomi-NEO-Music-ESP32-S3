@@ -14,6 +14,10 @@ static const char *TAG = "music";
 
 EXT_RAM_BSS_ATTR music_state_t g_music;
 
+/* song_list_t 有 8.6KB，放栈上会直接把主任务栈撑爆（栈只有 12KB）。
+   临时缓冲统一放这里，三处复用。 */
+static EXT_RAM_BSS_ATTR song_list_t s_tmp;
+
 void music_state_init(void)
 {
     memset(&g_music, 0, sizeof(g_music));
@@ -30,15 +34,23 @@ static void set_title(const char *s)
 
 bool music_load_home(void)
 {
-    netease_playlists(&g_music.playlists);
-    return music_load_daily();
+    /* 歌单与每日新歌各自独立，一个失败不影响另一个 */
+    bool ok_pl = netease_playlists(&g_music.playlists);
+    if (!ok_pl) {
+        g_music.playlists.count = 0;
+    }
+    bool ok_daily = music_load_daily();
+    ESP_LOGI(TAG, "首页加载：歌单 %d 个(%s)，每日新歌 %d 首(%s)",
+             g_music.playlists.count, ok_pl ? "成功" : "失败",
+             g_music.songs.count, ok_daily ? "成功" : "失败");
+    return ok_pl || ok_daily;
 }
 
 bool music_load_daily(void)
 {
-    song_list_t tmp;
-    if (!netease_daily(&tmp)) return false;
-    g_music.songs = tmp;
+    song_list_t *tmp = &s_tmp;
+    if (!netease_daily(tmp)) return false;
+    g_music.songs = *tmp;
     g_music.current = tmp.count > 0 ? 0 : -1;
     set_title("每日新歌");
     return true;
@@ -47,9 +59,9 @@ bool music_load_daily(void)
 bool music_load_playlist(int index)
 {
     if (index < 0 || index >= g_music.playlists.count) return false;
-    song_list_t tmp;
-    if (!netease_playlist_tracks(g_music.playlists.items[index].id, &tmp)) return false;
-    g_music.songs = tmp;
+    song_list_t *tmp = &s_tmp;
+    if (!netease_playlist_tracks(g_music.playlists.items[index].id, tmp)) return false;
+    g_music.songs = *tmp;
     g_music.current = tmp.count > 0 ? 0 : -1;
     set_title(g_music.playlists.items[index].name);
     return true;
@@ -58,9 +70,9 @@ bool music_load_playlist(int index)
 bool music_load_search(const char *keyword)
 {
     if (!keyword || !*keyword) return false;
-    song_list_t tmp;
-    if (!netease_search(keyword, 0, &tmp)) return false;
-    g_music.songs = tmp;
+    song_list_t *tmp = &s_tmp;
+    if (!netease_search(keyword, 0, tmp)) return false;
+    g_music.songs = *tmp;
     g_music.current = tmp.count > 0 ? 0 : -1;
     snprintf(g_music.list_title, sizeof(g_music.list_title), "搜索：%s", keyword);
     return true;

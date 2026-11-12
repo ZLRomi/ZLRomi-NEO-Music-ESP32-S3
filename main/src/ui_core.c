@@ -234,9 +234,18 @@ void ui_tick(void)
         gfx_fill(g_theme.bg);
         ops->draw();
         if (s_toast[0]) {
-            /* 提示条压在底部，中文，不用图标字体 */
-            gfx_rect(8, GFX_H - 40, GFX_W - 8, GFX_H - 8, g_theme.surface_hi);
-            gfx_text_center(GFX_H - 34, s_toast, g_theme.text, g_theme.surface_hi);
+            /* 提示条压在底部；用小字并按可用宽度截断，避免长文案显示不全 */
+            gfx_rect(8, GFX_H - 38, GFX_W - 8, GFX_H - 10, g_theme.surface_hi);
+            char msg[64];
+            strncpy(msg, s_toast, sizeof(msg) - 1);
+            msg[sizeof(msg) - 1] = '\0';
+            int avail = GFX_W - 24;
+            while (gfx_text_width_small(msg) > avail && strlen(msg) > 1) {
+                size_t n = strlen(msg);
+                size_t back = (msg[n - 1] & 0x80) ? 3 : 1;
+                msg[n - back] = '\0';
+            }
+            gfx_text_center_small(GFX_H - 32, msg, g_theme.text, g_theme.surface_hi);
         }
         gfx_flush();
         s_dirty = false;

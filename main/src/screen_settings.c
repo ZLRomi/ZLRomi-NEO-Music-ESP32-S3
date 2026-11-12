@@ -55,7 +55,7 @@ static void item_value(int i, char *buf, size_t cap)
     case 3: snprintf(buf, cap, "%d", g_cfg.brightness); break;
     case 4: snprintf(buf, cap, "%s", g_cfg.rotation == 0 ? "横屏" : "横屏翻转"); break;
     case 5: snprintf(buf, cap, "%s", music_mode_text()); break;
-    case 6: snprintf(buf, cap, "版本 %s", FW_VERSION); break;
+    case 6: snprintf(buf, cap, "v%s", FW_VERSION); break;
     }
 }
 
@@ -132,7 +132,7 @@ static void adjust(int i, int delta)
         music_set_mode((g_music.mode + 1) % 3);
         break;
     case 6:
-        ui_toast("HW-678 / ESP32-S3 / PCM5102A");
+        ui_toast("ESP32-S3 16MB+8MB 屏 240x320");
         break;
     }
 }

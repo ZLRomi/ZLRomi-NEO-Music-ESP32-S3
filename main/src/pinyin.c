@@ -264,7 +264,7 @@ void pinyin_key_label(int index, const pinyin_t *p, char *buf, size_t cap)
     pinyin_key_t t = pinyin_key_type(index);
     if (s_mode == KB_ASCII) {
         strncpy(buf, KEY_LABEL_ASCII[index], cap - 1);
-        buf[cap - 1] = ' ';
+        buf[cap - 1] = '\0';
         return;
     }
     if (t == PK_CANDIDATE) {
