@@ -27,6 +27,8 @@
 #define PIN_LCD_BL    42
 #define SCREEN_W      240
 #define SCREEN_H      320
+#define PIN_UART_TX   43
+#define PIN_UART_RX   44
 
 // =====================================================================
 //  全局变量
