@@ -8,6 +8,7 @@
 #include "gfx.h"
 #include "settings.h"
 #include "theme.h"
+#include "wifi_mgr.h"
 
 static const char *TAG = "ui";
 
@@ -37,6 +38,7 @@ static bool          s_asleep;
 static int64_t       s_last_act;
 static int64_t       s_toast_at;
 static char          s_toast[64];
+static wifi_state_t  s_last_wifi = WIFI_OFF;
 
 static int64_t now_ms(void)
 {
@@ -173,6 +175,13 @@ void ui_tick(void)
 {
     int64_t now = now_ms();
     input_poll();
+
+    /* WiFi 状态一变（连上/断开/重连）就重绘，界面上的网络信息才是实时的 */
+    wifi_state_t ws = wifi_mgr_state();
+    if (ws != s_last_wifi) {
+        s_last_wifi = ws;
+        s_dirty = true;
+    }
 
     input_event_t ev;
     while (input_next(&ev)) {

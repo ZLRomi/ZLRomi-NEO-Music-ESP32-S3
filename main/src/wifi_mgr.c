@@ -27,6 +27,7 @@ static const char *TAG = "wifi";
 } while (0)
 
 static wifi_state_t s_state = WIFI_OFF;
+static void        (*s_connected_cb)(void);
 static int          s_rssi = 0;
 static int          s_retry = 0;
 static char         s_ip[16] = "0.0.0.0";
@@ -67,6 +68,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
         s_state = WIFI_CONNECTED;
         s_retry = 0;
+        if (s_connected_cb) {
+            s_connected_cb();
+        }
         esp_wifi_sta_get_ap_info(NULL);   /* 触发一次 RSSI 刷新 */
         ESP_LOGI(TAG, "已连接，IP %s", s_ip);
     }
@@ -295,6 +299,11 @@ void wifi_mgr_save(const char *ssid, const char *pass)
     g_cfg.wifi_pass[sizeof(g_cfg.wifi_pass) - 1] = '\0';
     settings_save();
     ESP_LOGI(TAG, "已保存网络 %s", g_cfg.wifi_ssid);
+}
+
+void wifi_mgr_set_connected_callback(void (*cb)(void))
+{
+    s_connected_cb = cb;
 }
 
 void wifi_mgr_forget(void)

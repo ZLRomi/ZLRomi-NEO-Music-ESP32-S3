@@ -34,9 +34,36 @@ static void on_track_end(void)
     }
 }
 
+static void load_home_task(void *arg);
+static volatile bool s_loading;
+
+static void on_wifi_connected(void)
+{
+    /* 连上网才去拉在线数据 */
+    if (s_loading) {
+        return;
+    }
+    s_loading = true;
+    xTaskCreateWithCaps(load_home_task, "load_home", 16 * 1024, NULL, 4, NULL,
+                        MALLOC_CAP_SPIRAM);
+}
+
 static void load_home_task(void *arg)
 {
     (void)arg;
+    /* 必须等 WiFi 真的连上再拉数据：开机就发 HTTPS 请求的话，
+       DNS 还没就绪，首屏歌单必然是空的。等 IP 拿到再请求。 */
+    for (int i = 0; i < 120; i++) {
+        if (wifi_mgr_state() == WIFI_CONNECTED) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    if (wifi_mgr_state() != WIFI_CONNECTED) {
+        ESP_LOGW(TAG, "WiFi 未连接，先不拉在线数据");
+        return;
+    }
+
     if (music_load_home()) {
         ESP_LOGI(TAG, "首页数据就绪：%d 个歌单，%d 首每日新歌",
                  g_music.playlists.count, g_music.songs.count);
@@ -44,6 +71,7 @@ static void load_home_task(void *arg)
         ESP_LOGW(TAG, "在线数据暂不可用，界面会显示空列表");
     }
     ui_redraw();
+    s_loading = false;      /* 允许下次重连后再拉一次 */
     vTaskDelete(NULL);
 }
 
@@ -72,8 +100,7 @@ void app_main(void)
     ESP_LOGI(TAG, "按键：方向键移动焦点，OK 确认，SET 返回，RST 短按息屏/长按 3 秒重启页");
     ESP_LOGI(TAG, "配网热点：%s", wifi_mgr_ap_ssid());
 
-    xTaskCreateWithCaps(load_home_task, "load_home", 16 * 1024, NULL, 4, NULL,
-                        MALLOC_CAP_SPIRAM);
+    wifi_mgr_set_connected_callback(on_wifi_connected);
 
     while (true) {
         ui_tick();

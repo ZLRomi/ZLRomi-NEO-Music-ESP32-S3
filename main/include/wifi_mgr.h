@@ -39,3 +39,6 @@ int  wifi_mgr_scan(wifi_ap_t *aps, int max);
 void wifi_mgr_save(const char *ssid, const char *pass);
 /** 忘掉已保存的网络（下次开机回到配网热点） */
 void wifi_mgr_forget(void);
+
+/** 注册「连上网」回调：拿到 IP 时触发一次，用来拉在线音乐数据 */
+void wifi_mgr_set_connected_callback(void (*cb)(void));
