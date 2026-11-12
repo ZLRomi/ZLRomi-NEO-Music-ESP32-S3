@@ -30,6 +30,7 @@ PageId ui_current_page(void);
 void ui_update_song(const cfg_music *music);
 void ui_update_progress(int pos_ms, int dur_ms);
 void ui_update_lyrics(const char *prev, const char *cur, const char *next);
+void ui_update_cover(const char *url);
 void ui_update_recommend_list(void);
 void ui_update_search_results(void);
 void ui_update_playlist(void);

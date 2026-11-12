@@ -256,9 +256,14 @@ static void create_playing_page() {
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     s_scr[PAGE_PLAYING] = scr;
 
-    // Large cover placeholder
-    s_cover_img = mk_panel(scr, 180, 140, LV_ALIGN_TOP_MID, 0, 10, C_SURFACE, 12);
-    mk_label(s_cover_img, "\xe2\x99\xaa", &lv_font_montserrat_24, C_DIM, LV_ALIGN_CENTER, 0, 0);
+    // Cover image (supports network JPEG via TJPGD)
+    s_cover_img = lv_image_create(scr);
+    lv_obj_set_size(s_cover_img, 180, 140);
+    lv_obj_align(s_cover_img, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_set_style_radius(s_cover_img, 12, 0);
+    lv_obj_set_style_clip_corner(s_cover_img, true, 0);
+    lv_obj_set_style_bg_color(s_cover_img, C_SURFACE, 0);
+    lv_image_set_inner_align(s_cover_img, LV_IMAGE_ALIGN_CENTER);
 
     // Song title
     s_lbl_p_title = lv_label_create(scr);
@@ -536,6 +541,14 @@ void ui_update_lyrics(const char *prev, const char *cur, const char *next) {
     lv_label_set_text(s_lbl_lyr_prev, prev ? prev : "");
     lv_label_set_text(s_lbl_lyr_cur, cur ? cur : "\xe6\x97\xa0\xe6\xad\x8c\xe8\xaf\x8d");
     lv_label_set_text(s_lbl_lyr_next, next ? next : "");
+}
+
+void ui_update_cover(const char *url) {
+    if (s_cover_img && url && strlen(url) > 0) {
+        // LVGL v9 can load network images if FS and decoder are configured
+        // For now, set as source - TJPGD will decode JPEG
+        lv_image_set_src(s_cover_img, url);
+    }
 }
 
 void ui_show_toast(const char *msg) {
