@@ -1,40 +1,24 @@
 /*
- * settings —— 用户设置（NVS 持久化）
- *
- * 只存 7 个 key，和 UI与交互设计.md 第 4 节一致。
- * 写 NVS 会阻塞几十 ms，所以只在用户改设置时调用 settings_save()。
+ * settings.h —— 持久化设置（NVS）
  */
 #pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 typedef struct {
-    uint8_t dark;       /* 0=浅色 1=深色 */
-    uint8_t online;     /* 0=关 1=开（热点 + 网页 + 联网） */
-    uint8_t bootanim;   /* 0=关 1=开 */
-    uint8_t vol;        /* 0~100 */
-    uint8_t bright;     /* 0~100 */
-    uint8_t mode;       /* 0=顺序 1=单曲 2=随机 */
-    uint8_t screenoff;  /* 0=15s 1=30s 2=1min 3=5min */
-    uint8_t rot;        /* 屏幕方向 0~3；255 = 还没定，下次开机进自检 */
-} settings_t;
+    uint8_t volume;        /* 0~100 */
+    uint8_t brightness;    /* 0~100 */
+    uint8_t rotation;      /* 0~3 */
+    uint8_t quality;       /* 0 标准 / 1 较高 / 2 无损 */
+    uint8_t play_mode;     /* 0 顺序 / 1 单曲循环 / 2 随机 */
+    uint8_t boot_anim;     /* 开机动画开关 */
+    char    wifi_ssid[33];
+    char    wifi_pass[65];
+} app_settings_t;
 
-extern settings_t g_set;
+extern app_settings_t g_cfg;
 
-/** @brief 从 NVS 读设置，没有就用默认值 */
-void settings_load(void);
-
-/** @brief 写回 NVS（失败不 abort，只打日志） */
+/** 需在 nvs_flash_init() 之后调用 */
+void settings_init(void);
 void settings_save(void);
-
-/** @brief 息屏时间（秒） */
-int settings_screenoff_sec(void);
-
-#ifdef __cplusplus
-}
-#endif
