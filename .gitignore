@@ -2,6 +2,12 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-.pio/build
 .workbuddy/
 archive/
+
+# PlatformIO 遗留目录：旧工程用过 PIO，里面的第三方库在索引里是 gitlink，
+# 但没有对应 .gitmodules，CI 执行 git submodule 会 fatal 直接失败。
+.pio/
+build/
+managed_components/
+sdkconfig.old

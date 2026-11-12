@@ -51,7 +51,7 @@ bool music_load_daily(void)
     song_list_t *tmp = &s_tmp;
     if (!netease_daily(tmp)) return false;
     g_music.songs = *tmp;
-    g_music.current = tmp.count > 0 ? 0 : -1;
+    g_music.current = tmp->count > 0 ? 0 : -1;
     set_title("每日新歌");
     return true;
 }
@@ -62,7 +62,7 @@ bool music_load_playlist(int index)
     song_list_t *tmp = &s_tmp;
     if (!netease_playlist_tracks(g_music.playlists.items[index].id, tmp)) return false;
     g_music.songs = *tmp;
-    g_music.current = tmp.count > 0 ? 0 : -1;
+    g_music.current = tmp->count > 0 ? 0 : -1;
     set_title(g_music.playlists.items[index].name);
     return true;
 }
@@ -73,7 +73,7 @@ bool music_load_search(const char *keyword)
     song_list_t *tmp = &s_tmp;
     if (!netease_search(keyword, 0, tmp)) return false;
     g_music.songs = *tmp;
-    g_music.current = tmp.count > 0 ? 0 : -1;
+    g_music.current = tmp->count > 0 ? 0 : -1;
     snprintf(g_music.list_title, sizeof(g_music.list_title), "搜索：%s", keyword);
     return true;
 }
