@@ -31,6 +31,11 @@ static const char *TAG = "player";
 /* 封面贴在唱片中心的圆形纸标位置：真实黑胶唱片的中间就是圆纸标 */
 #define ART_SIZE   64
 #define ART_OFF    ((DISC_SIZE - ART_SIZE) / 2)
+/* 唱片旋转角度步长。以前是每 80ms 转 6° 并全屏重绘，CPU 被拖死导致音频抽搐；
+   现在改为每 240ms 转 6°（角速度不变，每秒 25°），重绘频率降到 1/3，
+   配合整数化的 render_disc，CPU 占用大幅下降。 */
+#define SPIN_STEP  6
+#define SPIN_MS    240
 
 typedef struct {
     int  ms;
@@ -91,34 +96,80 @@ static int current_lrc_line(int pos_ms)
     return cur;
 }
 
-static void render_disc(int angle)
+/*
+ * 黑胶唱片位图。
+ *
+ * ⚠️ 这里以前每个像素都做一次 double 精度的 sqrt/sin/cos。
+ *    ESP32-S3 只有单精度 FPU，double 全靠软件模拟；14400 个像素 × 每 80ms 一次
+ *    重绘 = 每秒 18 万次双精度运算，把音频任务饿到缓冲欠载 → 声音抽搐。
+ *
+ * 现在全部改为整数运算：
+ *   - 半径查表（避免 sqrt）
+ *   - 旋转用角度查 sin/cos 表（一格 6°，60 项）
+ *   - 高光判定改用整数点积
+ */
+/* 全部放 PSRAM：s_rad 有 14.4KB，内部 RAM 只有约 306KB，
+   而 WiFi/LWIP/TLS/任务栈都指着它活。 */
+static EXT_RAM_BSS_ATTR uint8_t s_rad[DISC_SIZE * DISC_SIZE];  /* 半径查表 0~63 */
+static EXT_RAM_BSS_ATTR int16_t s_cos_tbl[360 / SPIN_STEP];     /* cos ×1024 */
+static EXT_RAM_BSS_ATTR int16_t s_sin_tbl[360 / SPIN_STEP];     /* sin ×1024 */
+static bool s_disc_tables_ready;
+
+/*
+ * 建表（只跑一次）。这里可以用 sqrtf/sinf 这些单精度函数 ——
+ * ESP32-S3 有单精度 FPU，建表是一次性成本，不在每帧的热路径上。
+ */
+static void disc_build_tables(void)
 {
     const int c = DISC_SIZE / 2;
-    const double a = angle * 3.14159265358979323846 / 180.0;
-    double ca = cos(a), sa = sin(a);
-
     for (int y = 0; y < DISC_SIZE; y++) {
         for (int x = 0; x < DISC_SIZE; x++) {
             int dx = x - c, dy = y - c;
-            int d2 = dx * dx + dy * dy;
+            int r  = (int)sqrtf((float)(dx * dx + dy * dy));
+            if (r > 63) r = 63;
+            s_rad[y * DISC_SIZE + x] = (uint8_t)r;
+        }
+    }
+    for (int i = 0; i < 360 / SPIN_STEP; i++) {
+        float a = (float)(i * SPIN_STEP) * (float)M_PI / 180.0f;
+        s_cos_tbl[i] = (int16_t)(cosf(a) * 1024.0f);
+        s_sin_tbl[i] = (int16_t)(sinf(a) * 1024.0f);
+    }
+    s_disc_tables_ready = true;
+}
+
+static void render_disc(int angle)
+{
+    if (!s_disc_tables_ready) {
+        disc_build_tables();
+    }
+    int slot = (angle / SPIN_STEP) % (360 / SPIN_STEP);
+    int ca = s_cos_tbl[slot], sa = s_sin_tbl[slot];
+    const int c = DISC_SIZE / 2;
+
+    for (int y = 0; y < DISC_SIZE; y++) {
+        uint16_t *row = &s_disc[y * DISC_SIZE];
+        int dy = y - c;
+        for (int x = 0; x < DISC_SIZE; x++) {
+            int dx = x - c;
+            int r  = s_rad[y * DISC_SIZE + x];
             uint16_t col = g_theme.bg;
 
-            if (d2 <= 58 * 58) {
-                /* 黑胶底色，按半径做几道纹路 */
-                int ring = (int)sqrt((double)d2) % 7;
-                col = (ring < 2) ? C565(26, 27, 30) : C565(17, 18, 20);
+            if (r <= 58) {
+                /* 纹路：半径每 7 格一道深色环 */
+                col = (r % 7 < 2) ? C565(26, 27, 30) : C565(17, 18, 20);
 
-                /* 旋转高光：一条随角度转动的扇形反光 */
-                double proj = dx * ca + dy * sa;
-                double perp = -dx * sa + dy * ca;
-                if (proj > 12.0 && proj < 52.0 && fabs(perp) < 9.0) {
+                /* 旋转高光：把像素投影到旋转后的坐标轴，落在扇形内就提亮。
+                   整数化：cos/sin 已乘 1024，右移 10 位还原。 */
+                int proj = (dx * ca + dy * sa) >> 10;
+                int perp = (-dx * sa + dy * ca) >> 10;
+                if (proj > 12 && proj < 52 && perp > -9 && perp < 9) {
                     col = C565(58, 56, 50);
                 }
-                /* 中心圆标区域留给真实封面贴图，这里只画个深色底 */
-                if (d2 <= 32 * 32) col = C565(12, 12, 14);
-                if (d2 <= 4 * 4) col = g_theme.bg;             /* 轴孔 */
+                if (r <= 32) col = C565(12, 12, 14);   /* 中心留给封面纸标 */
+                if (r <= 4)  col = g_theme.bg;         /* 轴孔 */
             }
-            s_disc[y * DISC_SIZE + x] = col;
+            row[x] = col;
         }
     }
 }
@@ -210,15 +261,23 @@ static void player_draw(void)
     render_disc(s_angle);
     gfx_blit(DISC_X, DISC_Y, DISC_SIZE, DISC_SIZE, s_disc);
 
-    /* 唱片中心的封面纸标：有封面就贴真图，没有就画个琥珀色圆标占位 */
+    /* 唱片中心的封面纸标：有封面就贴真图，没有就画个琥珀色圆标占位。
+       ⚠️ cover_peek 每次都会把 18KB 从 PSRAM 缓存拷进来，而且要走互斥锁。
+          而这一页每 240ms 重绘一次，每次都拷 18KB 纯属浪费。
+          所以在这里按歌曲 id 缓存：只有换歌时才重新取一次。 */
     {
         song_t *cs = music_current();
         static EXT_RAM_BSS_ATTR cover_t art;
-        bool has_art = cs && cs->cover[0] &&
-                       cover_peek(cs->id, cs->cover, &art);
+        static int64_t s_art_id = -1;
+        static bool     s_art_ok = false;
+
+        if (cs && cs->cover[0] && cs->id != s_art_id) {
+            s_art_ok = cover_peek(cs->id, cs->cover, &art);
+            s_art_id = cs->id;
+        }
         int ax = DISC_X + ART_OFF;
         int ay = DISC_Y + ART_OFF;
-        if (has_art) {
+        if (cs && cs->cover[0] && s_art_ok) {
             gfx_blit_circle(ax, ay, ART_SIZE, art.px, COVER_W, COVER_H);
         } else {
             /* 占位：画一个音符。cover_peek 未命中时已自动登记后台下载 */
@@ -308,9 +367,10 @@ static void player_tick(void)
 {
     int64_t now = esp_timer_get_time() / 1000;
     player_check_lyric();
-    if (player_state() == PLAYER_PLAYING && (now - s_last_spin) > 80) {
+    if (player_state() == PLAYER_PLAYING && (now - s_last_spin) > SPIN_MS) {
         s_last_spin = now;
-        s_angle = (s_angle + 6) % 360;
+        /* 角度必须落在查表网格上（SPIN_STEP 的倍数），否则查表会错位 */
+        s_angle = (s_angle + SPIN_STEP) % 360;
         ui_redraw();
     } else if (now - s_last_spin > 400) {
         /* 静止时也定期刷新进度条与时间 */

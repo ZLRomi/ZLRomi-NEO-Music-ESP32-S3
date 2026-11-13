@@ -44,12 +44,13 @@ static int64_t now_ms_simple(void)
       失败 → s_q 已建但没人消费 → 队列积满 → 误报「播放地址获取失败」。
       24KB 是实测能塞进去的值。 */
 #define AUDIO_STACK   (24 * 1024)
-/* I2S DMA 深度。DMA 缓冲必须放在内部 RAM，而 WiFi/LWIP + 多个任务栈 + TLS 握手
-   已经把内部堆吃得很紧：设成 10×480（19.2KB）时所有 HTTPS 请求直接
-   ESP_ERR_HTTP_CONNECT（TLS 握手拿不到内存）。
-   6×320≈7.7KB ≈ 43ms，够扛住一次任务切换，别再往上加。 */
-#define I2S_DESC_NUM  6
-#define I2S_FRAME_NUM 320
+/* I2S DMA 深度。DMA 缓冲必须在内部 RAM（DMA 引擎读不了 PSRAM）。
+   8×480≈15.4KB ≈ 87ms 音频缓冲：UI 每 240ms 重绘一次、歌词到达时还要抢 CPU，
+   有这么深的队列才不至于欠载抽搐。
+   注意别再加：内部 RAM 总共约 306KB，WiFi/LWIP/TLS/4 个任务栈都在抢，
+   实测加到 10×480（19.2KB）时 TLS 握手会直接失败。 */
+#define I2S_DESC_NUM  8
+#define I2S_FRAME_NUM 480
 
 typedef enum { CMD_PLAY, CMD_STOP, CMD_TOGGLE, CMD_VOL } cmd_type_t;
 
