@@ -28,13 +28,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * 容量常量。
+ *
+ * 这些结构体（song_list_t / playlist_list_t / music_state_t）全部放在 PSRAM 里，
+ * 所以可以放心往大里留 —— 8MB PSRAM 对这些占用量来说是九牛一毛，
+ * 而内部 RAM 只有约 306KB，寸土寸金。
+ *
+ * 留大一点是为了将来：歌单想一次拉更多首、歌词想存更多行、搜索想翻更多页，
+ * 都不用再回头改结构体和内存布局。
+ */
 #define SONG_NAME_LEN    64
 #define SONG_ARTIST_LEN  48
-#define SONG_COVER_LEN   160
+#define SONG_COVER_LEN   192
 #define SONG_URL_LEN     512
-#define PLAYLIST_MAX     12
-#define SONG_MAX         30
-#define LYRIC_MAX        4096
+#define PLAYLIST_MAX     16      /* 首页最多展示 16 个歌单 */
+#define SONG_MAX         50      /* 一页最多 50 首 */
+#define LYRIC_MAX        16384   /* 歌词原文上限：长歌词（尤其逐字）能到十几 KB */
 
 typedef struct {
     int64_t id;

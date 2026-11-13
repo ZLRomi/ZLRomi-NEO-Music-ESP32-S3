@@ -32,6 +32,10 @@ static EXT_RAM_BSS_ATTR song_list_t s_tmp;
  *
  * 播放地址则由 player 的音频任务自己取，不经过这里。
  */
+/* 12KB：跑 HTTPS + TLS，还要调 NVS / 读 flash。
+   ⚠️ 栈必须在内部 RAM：任务栈在 PSRAM 时调用 SPI flash API 会触发
+      esp_task_stack_is_sane_cache_disabled() 断言直接崩溃 ——
+      这正是「一点歌就闪屏重启」的根因（NVS 就在 flash 上）。 */
 #define LYRIC_STACK  (12 * 1024)
 
 typedef struct {
@@ -127,8 +131,8 @@ void music_state_init(void)
     s_lyric_q = xQueueCreate(4, sizeof(lyric_req_t));
     s_lyric_lock = xSemaphoreCreateMutex();
     if (s_lyric_q && s_lyric_lock) {
-        if (xTaskCreateWithCaps(lyric_task, "lyric", LYRIC_STACK, NULL, 3, NULL,
-                                MALLOC_CAP_SPIRAM) != pdPASS) {
+        /* 栈必须在内部 RAM：PSRAM 栈上调用 flash/NVS 会直接断言崩溃 */
+        if (xTaskCreate(lyric_task, "lyric", LYRIC_STACK, NULL, 3, NULL) != pdPASS) {
             ESP_LOGE(TAG, "歌词任务创建失败");
             s_lyric_q = NULL;
         }

@@ -3,7 +3,7 @@
  *
  * 架构：
  *   UI 线程  cover_peek()  → 查缓存失败就把 id/url 投进队列，立即返回 false
- *   后台任务  cover_task() → 从队列取任务，下载 JPEG（带浏览器 UA）、解码成 56x56
+ *   后台任务  cover_task() → 从队列取任务，下载 JPEG（带浏览器 UA）、解码成 96x96
  *                            RGB565，写入缓存；永不阻塞 UI
  *
  * 缓存用最近最少使用淘汰（LRU），容量 CACHE_N 张。封面 URL 一并缓存，
@@ -32,10 +32,12 @@ void ui_redraw(void);
 
 static const char *TAG = "cover";
 
-#define CACHE_N     12          /* 首页 4 + 列表 5 + 播放页 1，留余量 */
-#define QUEUE_N     24
+#define CACHE_N     24          /* 24 张 × 18KB ≈ 432KB，全在 PSRAM（8MB 里占 5%） */
+#define QUEUE_N     32
 #define BODY_MAX    (48 * 1024)
-/* 12KB：jpeg_t 结构体本身就在栈上（约 2.3KB），再加 HTTP 客户端开销，8KB 太紧 */
+/* 12KB：jpeg_t 结构体本身在栈上约 2.3KB，再加 HTTP/TLS 开销。
+   ⚠️ 栈在内部 RAM：PSRAM 栈上跑 TLS（内部要走 flash 读证书）会触发
+      esp_task_stack_is_sane_cache_disabled() 断言崩溃。 */
 #define TASK_STACK  (12 * 1024)
 
 /* 这些 CDN 走 HTTPS 需要正常 UA，个别节点对空 UA 直接 403 */
@@ -71,7 +73,37 @@ typedef struct {
     bool     overflow;
 } body_t;
 
-static esp_err_t on_event(esp_http_client_event_t *e){
+/**
+ * 分配下载缓冲。
+ * 一律走 PSRAM：封面 JPEG 最大 48KB，用普通 malloc 会在内部 RAM 里挖一个大洞，
+ * 而内部 RAM 只有约 306KB，WiFi/LWIP 与 mbedTLS 都要挤在那里。
+ * 下载缓冲只是普通数据，不参与 DMA。
+ */
+static void *body_alloc(size_t n)
+{
+    void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        p = malloc(n);   /* PSRAM 不足时退回内部 RAM */
+    }
+    return p;
+}
+
+/** 扩容（不用 realloc：它不保证保持 PSRAM 属性） */
+static void *body_grow(void *old, size_t old_len, size_t want)
+{
+    void *p = body_alloc(want);
+    if (!p) {
+        return NULL;
+    }
+    if (old && old_len) {
+        memcpy(p, old, old_len);
+    }
+    free(old);
+    return p;
+}
+
+static esp_err_t on_event(esp_http_client_event_t *e)
+{
     body_t *b = (body_t *)e->user_data;
     if (e->event_id == HTTP_EVENT_ON_DATA && b) {
         if (b->len + e->data_len + 1 > b->cap) {
@@ -80,7 +112,7 @@ static esp_err_t on_event(esp_http_client_event_t *e){
                 b->overflow = true;
                 return ESP_FAIL;
             }
-            uint8_t *p = realloc(b->buf, want);
+            uint8_t *p = body_grow(b->buf, b->len, want);
             if (!p) {
                 b->overflow = true;
                 return ESP_FAIL;
@@ -107,10 +139,9 @@ void cover_init(void)
         return;
     }
     s_ready = true;
-    /* 栈放 PSRAM：内部 RAM 要留给 WiFi/LWIP 与 mbedTLS。
-       封面任务不碰音频 DMA，PSRAM 栈完全够用。 */
-    if (xTaskCreateWithCaps(cover_task_body, "cover", TASK_STACK, NULL, 4, &s_task,
-                            MALLOC_CAP_SPIRAM) != pdPASS) {
+    /* 栈必须在内部 RAM：PSRAM 栈上跑 TLS / 读 flash 会断言崩溃。
+       缓冲与缓存另用 heap_caps 单独放到 PSRAM，不占内部 RAM。 */
+    if (xTaskCreate(cover_task_body, "cover", TASK_STACK, NULL, 4, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "封面任务创建失败");
         s_ready = false;
         return;
@@ -187,22 +218,49 @@ void cover_request(int64_t song_id, const char *url)
     }
 }
 
+/**
+ * 规范化封面 URL。
+ *
+ * 歌单接口返回的封面 URL 有时自带参数（?param=...、?imageView...），
+ * 直接拼 &param=200y200 服务端不一定认，实测会返回 PNG（89 50 4E 47），
+ * 而我们的解码器只吃 JPEG。所以这里把原来的参数整段砍掉，重新指定：
+ *
+ *    ?param=200y200&type=jpg
+ *
+ * param 是网易云 CDN 的缩略图参数，type=jpg 明确要 JPEG。
+ * 200x200 是为播放页 96x96 留余量，下载量约 7KB，远小于原图。
+ */
+static void build_cover_url(const char *src, char *dst, size_t cap)
+{
+    if (!src || !*src) {
+        dst[0] = '\0';
+        return;
+    }
+    /* 找到 '?' 之前的位置，保留 scheme + host + path */
+    const char *q = strchr(src, '?');
+    size_t n = q ? (size_t)(q - src) : strlen(src);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+
+    const char *suffix = "?param=200y200&type=jpg";
+    if (n + strlen(suffix) < cap) {
+        memcpy(dst + n, suffix, strlen(suffix) + 1);
+    }
+}
+
 /** 下载并解码一张封面，成功返回 true */
 static bool fetch_one(const req_t *r, cover_t *out)
 {
-    /* 网易云支持 ?param=WxH 缩略图，下载量从 37KB 降到 4KB */
     char u[SONG_COVER_LEN + 32];
-    /* 原 URL 可能已带参数，这里按需拼接 */
-    if (strchr(r->url, '?')) {
-        snprintf(u, sizeof(u), "%s&param=120y120", r->url);
-    } else {
-        snprintf(u, sizeof(u), "%s?param=120y120", r->url);
-    }
+    build_cover_url(r->url, u, sizeof(u));
 
-    body_t b = { .buf = malloc(4096), .len = 0, .cap = 4096, .overflow = false };
+    body_t b = { .buf = body_alloc(4096), .len = 0, .cap = 4096, .overflow = false };
     if (!b.buf) {
         return false;
     }
+
+    ESP_LOGI(TAG, "下封面 %s", u);
 
     esp_http_client_config_t cfg = {
         .url = u,
@@ -227,16 +285,23 @@ static bool fetch_one(const req_t *r, cover_t *out)
 
     bool ok = false;
     if (err == ESP_OK && status >= 200 && status < 300 && !b.overflow && b.len > 128) {
-        /* 先确认确实是 JPEG（FF D8），否则解码器会在乱数据上空转 */
-        if (b.buf[0] == 0xFF && b.buf[1] == 0xD8) {
+        /* 先确认确实是图片（JPEG 的 FF D8 或 PNG 的 89 50 4E 47）。
+           网易云 CDN 两种都给：早期多 JPEG，现在 param 参数有时返回 PNG。
+           之前只认 JPEG，导致大部分封面被丢掉、只显示占位图。 */
+        bool is_jpeg = (b.buf[0] == 0xFF && b.buf[1] == 0xD8);
+        bool is_png  = (b.buf[0] == 0x89 && b.buf[1] == 'P' &&
+                        b.buf[2] == 'N' && b.buf[3] == 'G');
+        if (is_jpeg || is_png) {
             ok = jpeg_decode_rgb565(b.buf, b.len, out->px, COVER_W, COVER_H);
             if (!ok) {
-                ESP_LOGW(TAG, "JPEG 解码失败 id=%lld（%u 字节）",
-                         (long long)r->id, (unsigned)b.len);
+                ESP_LOGW(TAG, "解码失败 id=%lld（%s，%u 字节）",
+                         (long long)r->id, is_png ? "PNG" : "JPEG",
+                         (unsigned)b.len);
             }
         } else {
-            ESP_LOGW(TAG, "不是 JPEG id=%lld（头 %02X %02X，%u 字节）",
-                     (long long)r->id, b.buf[0], b.buf[1], (unsigned)b.len);
+            ESP_LOGW(TAG, "不是图片 id=%lld（头 %02X %02X %02X %02X，%u 字节）",
+                     (long long)r->id, b.buf[0], b.buf[1], b.buf[2], b.buf[3],
+                     (unsigned)b.len);
         }
     } else {
         ESP_LOGW(TAG, "封面下载失败 id=%lld（status=%d err=%s len=%u）",

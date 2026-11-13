@@ -16,8 +16,17 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define COVER_W  56
-#define COVER_H  56
+/*
+ * 封面尺寸。
+ *
+ * 存 96x96 而不是刚好够列表用的尺寸，是为了播放页能直接用大图：
+ * 列表页用 gfx_blit_scaled 缩到 32x32，播放页直接贴 96x96。
+ * 缓存统一存一份，不做两套尺寸，省 PSRAM 也省解码开销。
+ *
+ * 96x96x2 = 18KB 一张，24 张缓存 = 432KB，全在 PSRAM（8MB 里占 5%）。
+ */
+#define COVER_W  96
+#define COVER_H  96
 
 typedef struct {
     uint16_t px[COVER_W * COVER_H];

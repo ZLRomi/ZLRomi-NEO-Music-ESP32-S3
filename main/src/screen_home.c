@@ -19,12 +19,16 @@
 #include "theme.h"
 #include "wifi_mgr.h"
 
-#define CARD_W   72
-#define CARD_H   84
-#define CARD_X0  6
-#define CARD_DX  78
-#define CARD_Y0  40
-#define CARD_DY  92
+/* 卡片布局：屏幕 320 宽，一行 4 张。
+ * (320 - 2*4) / 4 = 78，留 2px 间隙后卡片宽 76。
+ * 封面统一存 96x96，卡片里缩到 68 显示。 */
+#define CARD_W   76
+#define CARD_H   88
+#define CARD_X0  4
+#define CARD_DX  79
+#define CARD_Y0  38
+#define CARD_DY  96
+#define CARD_ART 68          /* 卡片里封面显示尺寸 */
 
 static focus_t s_focus;
 static EXT_RAM_BSS_ATTR cover_t s_covers[4];
@@ -70,11 +74,12 @@ static void draw_card(int col, int row, const char *label, const cover_t *cover,
 
     uint16_t fg = focused ? g_theme.accent : g_theme.text_dim;
     if (cover) {
-        gfx_blit(x + (CARD_W - COVER_W) / 2, y + 2, COVER_W, COVER_H, cover->px);
+        gfx_blit_scaled(x + (CARD_W - CARD_ART) / 2, y + 2,
+                        CARD_ART, CARD_ART, cover->px, COVER_W, COVER_H);
     } else if (icon != ICON_COUNT) {
-        gfx_icon(x + (CARD_W - 16) / 2, y + 20, icon, fg);
+        gfx_icon(x + (CARD_W - 16) / 2, y + 24, icon, fg);
     }
-    /* 歌单名用小字，卡片 72px 宽能放 4 个汉字 */
+    /* 歌单名用小字，卡片 76px 宽能放 4 个汉字 */
     char short_name[25];
     size_t bytes = 0, chars = 0;
     const char *p = label;
@@ -88,7 +93,7 @@ static void draw_card(int col, int row, const char *label, const cover_t *cover,
     }
     short_name[bytes] = '\0';
     int tw = gfx_text_width_small(short_name);
-    gfx_text_small(x + (CARD_W - tw) / 2, y + COVER_H + 6, short_name,
+    gfx_text_small(x + (CARD_W - tw) / 2, y + CARD_ART + 6, short_name,
                    focused ? g_theme.text : g_theme.text_dim,
                    focused ? g_theme.focus : g_theme.surface);
 }

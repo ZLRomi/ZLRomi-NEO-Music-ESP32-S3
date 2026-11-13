@@ -8,6 +8,7 @@
 
 #include "board.h"
 #include "driver/i2s_std.h"
+#include "esp_attr.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -20,8 +21,15 @@
 
 static const char *TAG = "player";
 
-#define IN_BUF_SIZE   (16 * 1024)
-#define READ_CHUNK    (4 * 1024)
+/* 32KB 输入缓冲：网络抖动时能多扛一会儿，不容易断流重连。
+   放 PSRAM（heap_caps_malloc 已在 decode_stream 里指定 SPIRAM）。 */
+#define IN_BUF_SIZE   (32 * 1024)
+#define READ_CHUNK    (8 * 1024)
+/* 32KB：跑 minimp3 软解 + HTTPS 取播放地址。
+   ⚠️ 栈必须在内部 RAM：音频任务要调 netease_resolve_url()，里面有 NVS 读取，
+      而任务栈在 PSRAM 时调用 flash API 会触发
+      esp_task_stack_is_sane_cache_disabled() 断言直接崩溃。
+      实测日志正是这条断言 —— 「一点歌就闪屏重启」。 */
 #define AUDIO_STACK   (32 * 1024)
 
 typedef enum { CMD_PLAY, CMD_STOP, CMD_TOGGLE, CMD_VOL } cmd_type_t;
@@ -45,10 +53,12 @@ static volatile bool           s_paused;
 static volatile bool           s_stop_req;
 static song_t                  s_song;
 
-/* minimp3 解码器自身十几 KB，加上函数内约 15KB scratch，必须 static */
-static mp3dec_t s_dec;
-static int16_t  s_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-static int16_t  s_stereo[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
+/* minimp3 解码器自身十几 KB，加上函数内约 15KB scratch，必须 static。
+   这三块是纯计算数据：i2s_channel_write() 是拷贝到 I2S 自己的 DMA 缓冲，
+   不从这里直接取，所以放 PSRAM 完全安全，给内部 RAM 腾地方。 */
+static EXT_RAM_BSS_ATTR mp3dec_t s_dec;
+static EXT_RAM_BSS_ATTR int16_t  s_pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
+static EXT_RAM_BSS_ATTR int16_t  s_stereo[MINIMP3_MAX_SAMPLES_PER_FRAME * 2];
 
 static inline int16_t gain_sample(int16_t v, int gain)
 {
@@ -158,10 +168,15 @@ static void decode_stream(const song_t *song, int quality)
 
         int space = IN_BUF_SIZE - have;
         if (space < READ_CHUNK) {
-            /* 长时间找不到帧同步时滑掉前半缓冲，避免死等 */
+            /* 缓冲快满了：丢掉前半段已解码的旧数据，腾出空间。
+               ⚠️ have 可能小于 IN_BUF_SIZE/2，这时 have-drop 是负数，
+                  memmove 拿到 (size_t)负数 会瞬间写穿 PSRAM —— 必须判。 */
             int drop = IN_BUF_SIZE / 2;
-            memmove(buf, buf + drop, have - drop);
-            have -= drop;
+            if (drop > have) drop = have;
+            if (drop > 0) {
+                memmove(buf, buf + drop, (size_t)(have - drop));
+                have -= drop;
+            }
             space = IN_BUF_SIZE - have;
         }
         int r = esp_http_client_read(cli, (char *)buf + have, space);
@@ -272,8 +287,8 @@ void player_init(void)
         ESP_LOGE(TAG, "命令队列创建失败");
         return;
     }
-    if (xTaskCreateWithCaps(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL,
-                            MALLOC_CAP_SPIRAM) != pdPASS) {
+    /* 栈放内部 RAM：要跑 TLS 取播放地址，PSRAM 栈上调 flash/NVS 会断言崩溃 */
+    if (xTaskCreate(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL) != pdPASS) {
         ESP_LOGE(TAG, "音频任务创建失败");
         return;
     }

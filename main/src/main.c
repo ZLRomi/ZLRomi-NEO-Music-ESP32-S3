@@ -45,8 +45,9 @@ static void on_wifi_connected(void)
         return;
     }
     s_loading = true;
-    xTaskCreateWithCaps(load_home_task, "load_home", 16 * 1024, NULL, 4, NULL,
-                        MALLOC_CAP_SPIRAM);
+    /* 栈必须在内部 RAM：PSRAM 栈上跑 HTTPS（TLS 要读 flash 里的证书）会触发
+       esp_task_stack_is_sane_cache_disabled() 断言直接崩溃。 */
+    xTaskCreate(load_home_task, "load_home", 16 * 1024, NULL, 4, NULL);
 }
 
 static void load_home_task(void *arg)

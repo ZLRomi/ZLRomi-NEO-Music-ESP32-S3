@@ -278,6 +278,30 @@ void gfx_blit_scaled(int x, int y, int w, int h,
     mark_dirty(y, y + h);
 }
 
+void gfx_blit_circle(int x, int y, int d,
+                     const uint16_t *src, int sw, int sh)
+{
+    if (!s_fb || !src || d <= 0 || sw <= 0 || sh <= 0) return;
+    y += s_offset_y;
+    if (x < 0 || y < 0 || x + d > GFX_W || y + d > GFX_H) return;
+
+    const int c = d / 2;
+    const int r2 = c * c;
+    for (int dy = 0; dy < d; dy++) {
+        int sy = dy * sh / d;
+        uint16_t *dst = &s_fb[(size_t)(y + dy) * GFX_W + x];
+        for (int dx = 0; dx < d; dx++) {
+            int ex = dx - c;
+            int ey = dy - c;
+            /* 圆外留空，露出底下的唱片纹路 */
+            if (ex * ex + ey * ey > r2) continue;
+            int sx = dx * sw / d;
+            dst[dx] = to_panel(src[(size_t)sy * sw + sx]);
+        }
+    }
+    mark_dirty(y, y + d);
+}
+
 void gfx_pixel(int x, int y, uint16_t color)
 {
     if (!s_fb) return;

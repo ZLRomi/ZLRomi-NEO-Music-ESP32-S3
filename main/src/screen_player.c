@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cover.h"
 #include "gfx.h"
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -27,17 +28,23 @@ static const char *TAG = "player";
 #define DISC_Y     32
 #define INFO_X     134
 #define INFO_W     (GFX_W - INFO_X - 8)
+/* 封面贴在唱片中心的圆形纸标位置：真实黑胶唱片的中间就是圆纸标 */
+#define ART_SIZE   64
+#define ART_OFF    ((DISC_SIZE - ART_SIZE) / 2)
 
 typedef struct {
     int  ms;
     char text[64];
 } lrc_line_t;
 
+#define LRC_LINES  256      /* 歌词行数上限：256 × 72B ≈ 18KB，全在 PSRAM */
+
 static focus_t    s_focus;
 static EXT_RAM_BSS_ATTR uint16_t s_disc[DISC_SIZE * DISC_SIZE];
 static int        s_angle;
 static int64_t    s_last_spin;
-static lrc_line_t s_lines[64];
+/* 128 行 × 72 字节 ≈ 9KB，放 PSRAM，别占内部 RAM */
+static EXT_RAM_BSS_ATTR lrc_line_t s_lines[LRC_LINES];
 static int        s_line_count;
 /* 已解析进 s_lines 的歌词属于哪首歌；-1 = 还没解析过 */
 static int        s_lyric_id = -1;
@@ -51,7 +58,7 @@ static void parse_lrc(const char *lrc)
     s_line_count = 0;
     if (!lrc || !*lrc) return;
     const char *p = lrc;
-    while (*p && s_line_count < 64) {
+    while (*p && s_line_count < LRC_LINES) {
         if (*p != '[') { p++; continue; }
         int min = 0, sec = 0, cs = 0;
         if (sscanf(p, "[%d:%d.%d", &min, &sec, &cs) < 2) { p++; continue; }
@@ -107,8 +114,8 @@ static void render_disc(int angle)
                 if (proj > 12.0 && proj < 52.0 && fabs(perp) < 9.0) {
                     col = C565(58, 56, 50);
                 }
-                if (d2 <= 19 * 19) col = g_theme.accent_dim;   /* 中心标签 */
-                if (d2 <= 15 * 15) col = g_theme.accent;
+                /* 中心圆标区域留给真实封面贴图，这里只画个深色底 */
+                if (d2 <= 32 * 32) col = C565(12, 12, 14);
                 if (d2 <= 4 * 4) col = g_theme.bg;             /* 轴孔 */
             }
             s_disc[y * DISC_SIZE + x] = col;
@@ -202,6 +209,23 @@ static void player_draw(void)
     /* 唱片 */
     render_disc(s_angle);
     gfx_blit(DISC_X, DISC_Y, DISC_SIZE, DISC_SIZE, s_disc);
+
+    /* 唱片中心的封面纸标：有封面就贴真图，没有就画个琥珀色圆标占位 */
+    {
+        song_t *cs = music_current();
+        static EXT_RAM_BSS_ATTR cover_t art;
+        bool has_art = cs && cs->cover[0] &&
+                       cover_peek(cs->id, cs->cover, &art);
+        int ax = DISC_X + ART_OFF;
+        int ay = DISC_Y + ART_OFF;
+        if (has_art) {
+            gfx_blit_circle(ax, ay, ART_SIZE, art.px, COVER_W, COVER_H);
+        } else {
+            /* 占位：画一个音符。cover_peek 未命中时已自动登记后台下载 */
+            gfx_icon(ax + (ART_SIZE - 16) / 2, ay + (ART_SIZE - 16) / 2,
+                     ICON_NOTE, g_theme.accent_dim);
+        }
+    }
 
     /* 右侧：歌名 / 歌手 / 进度 / 歌词 */
     song_t *s = music_current();

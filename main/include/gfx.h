@@ -24,8 +24,11 @@ void gfx_hline(int x0, int x1, int y, uint16_t color);
 void gfx_vline(int x, int y0, int y1, uint16_t color);
 void gfx_frame(int x0, int y0, int x1, int y1, uint16_t color);
 void gfx_blit(int x, int y, int w, int h, const uint16_t *buf);
-/** 最近邻缩放贴图：封面从 56x56 缩到列表行的 40x40 */
+/** 最近邻缩放贴图：封面统一存 96x96，列表页缩到 32x32、首页缩到 68x68 */
 void gfx_blit_scaled(int x, int y, int w, int h,
+                     const uint16_t *src, int sw, int sh);
+/** 圆形裁剪贴图：播放页唱片中心的封面纸标 */
+void gfx_blit_circle(int x, int y, int d,
                      const uint16_t *src, int sw, int sh);
 /** 单像素写入（图标绘制用），越界自动忽略 */
 void gfx_pixel(int x, int y, uint16_t color);
