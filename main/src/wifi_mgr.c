@@ -95,6 +95,16 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_state = WIFI_CONNECTED;
         s_retry = 0;
         start_sntp();                     /* 海棠签名需要真实时间 */
+        /* 流式播放必须关掉 WiFi 省电：
+           省电模式下射频按 DTIM 周期休眠唤醒，读流会出现几十到上百毫秒的延迟尖峰，
+           音频缓冲一被打空就「抽搐 / 卡顿」。
+           代价是功耗略升，但这台机器一直是插电用的，无所谓。 */
+        esp_err_t ps = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (ps == ESP_OK) {
+            ESP_LOGI(TAG, "WiFi 省电已关闭（流式播放不抽搐）");
+        } else {
+            ESP_LOGW(TAG, "WiFi 省电关闭失败: %s", esp_err_to_name(ps));
+        }
         if (s_connected_cb) {
             s_connected_cb();
         }

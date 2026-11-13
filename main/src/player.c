@@ -13,6 +13,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -21,16 +22,28 @@
 
 static const char *TAG = "player";
 
-/* 32KB 输入缓冲：网络抖动时能多扛一会儿，不容易断流重连。
+static int64_t now_ms_simple(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+/* 64KB 输入缓冲。44.1kHz 立体声 16bit = 176KB/s，64KB 约等于 0.36 秒音频，
+   网络抖动一二百毫秒也打得住。原来的 32KB 只有 0.18 秒，一抖就欠载 → 声音抽搐。
    放 PSRAM（heap_caps_malloc 已在 decode_stream 里指定 SPIRAM）。 */
-#define IN_BUF_SIZE   (32 * 1024)
-#define READ_CHUNK    (8 * 1024)
+#define IN_BUF_SIZE   (64 * 1024)
+#define READ_CHUNK    (16 * 1024)
+/* 起播前先攒够这么多字节再出声，避免「刚开播就欠载」的连贯抽搐 */
+#define PREBUFFER_MIN (24 * 1024)
 /* 32KB：跑 minimp3 软解 + HTTPS 取播放地址。
    ⚠️ 栈必须在内部 RAM：音频任务要调 netease_resolve_url()，里面有 NVS 读取，
       而任务栈在 PSRAM 时调用 flash API 会触发
       esp_task_stack_is_sane_cache_disabled() 断言直接崩溃。
       实测日志正是这条断言 —— 「一点歌就闪屏重启」。 */
 #define AUDIO_STACK   (32 * 1024)
+/* I2S DMA 深度：descr 数 × 每帧字节 = 可排队的音频量。
+   10×480帧×4字节 ≈ 19KB ≈ 108ms，CPU 被 WiFi 任务抢走时也来得及补。 */
+#define I2S_DESC_NUM  10
+#define I2S_FRAME_NUM 480
 
 typedef enum { CMD_PLAY, CMD_STOP, CMD_TOGGLE, CMD_VOL } cmd_type_t;
 
@@ -140,6 +153,30 @@ static void decode_stream(const song_t *song, int quality)
     int have = 0, cur_hz = 0;
     s_pos_ms = 0;
     s_dur_ms = song->duration_ms;
+
+    /* 预缓冲：先攒够 PREBUFFER_MIN 再开始出声。
+       边下边播且缓冲一上来就空的话，开头会连续抽搐几十毫秒，
+       听起来就是「刚放就卡一下」。 */
+    {
+        int64_t pre_start = now_ms_simple();
+        for (;;) {
+            int pr = esp_http_client_read(cli, (char *)buf + have,
+                                          IN_BUF_SIZE - have);
+            if (pr < 0) {
+                break;                       /* 流出错，交给主循环收尾 */
+            }
+            if (pr > 0) {
+                have += pr;
+            }
+            /* 攒够了、流读完了、或等太久（8 秒）就放行，不能一直卡在这 */
+            if (have >= PREBUFFER_MIN) break;
+            if (pr == 0 && have > 0) break;
+            if (now_ms_simple() - pre_start > 8000) break;
+        }
+        ESP_LOGI(TAG, "预缓冲 %d 字节（耗时 %lld ms）", have,
+                 (long long)(now_ms_simple() - pre_start));
+    }
+
     s_state = PLAYER_PLAYING;
 
     while (!s_stop_req) {
@@ -251,8 +288,8 @@ static void audio_task(void *arg)
 void player_init(void)
 {
     i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
-    chan.dma_desc_num = 4;
-    chan.dma_frame_num = 240;
+    chan.dma_desc_num = I2S_DESC_NUM;
+    chan.dma_frame_num = I2S_FRAME_NUM;
     esp_err_t err = i2s_new_channel(&chan, &s_tx, NULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "创建 I2S 通道失败: %s（音频不可用，界面继续）", esp_err_to_name(err));
