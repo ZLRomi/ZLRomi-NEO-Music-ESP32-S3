@@ -183,7 +183,10 @@ static void load_task(void *arg)
             if (req.kind == LREQ_DAILY) {
                 set_title("每日新歌");
             } else if (req.kind == LREQ_SEARCH) {
-                char t[64];
+                /* t 留够余量：\"搜索：\" 是 3 个汉字共 9 字节，关键词最多 63 字节，
+                   合起来可能超过 list_title 的 64 —— 所以这里放到 80，
+                   由 set_title 负责最终截断，免得 -Werror=format-truncation 报错。 */
+                char t[80];
                 snprintf(t, sizeof(t), "搜索：%s", req.keyword);
                 set_title(t);
             } else if (idx < g_music.playlists.count) {

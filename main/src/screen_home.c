@@ -73,7 +73,8 @@ static void draw_card(int col, int row, const char *label, icon_id_t icon, bool 
     }
     short_name[bytes] = '\0';
     int tw = gfx_text_width_small(short_name);
-    gfx_text_small(x + (CARD_W - tw) / 2, y + CARD_ART + 6, short_name,
+    /* 卡片高 88，图标占中间，名字落在下方；不放封面所以位置按图标区算 */
+    gfx_text_small(x + (CARD_W - tw) / 2, y + 68, short_name,
                    focused ? g_theme.text : g_theme.text_dim,
                    focused ? g_theme.focus : g_theme.surface);
 }
