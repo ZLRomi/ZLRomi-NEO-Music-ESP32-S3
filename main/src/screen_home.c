@@ -28,25 +28,29 @@
 
 static focus_t s_focus;
 static EXT_RAM_BSS_ATTR cover_t s_covers[4];
-static bool    s_cover_loaded;
 
 static void home_enter(void *arg)
 {
     (void)arg;
     focus_init(&s_focus, 4, 2);
-    s_cover_loaded = false;
 }
 
+/**
+ * 登记 4 张歌单封面，让后台去下载。
+ *
+ * 绝不能在这里同步下载 —— 4 张 JPEG 串行下载会把界面冻住好几秒，
+ * 从歌单页返回首页还会再冻一次。改成：命中缓存就用，没命中就登记到后台队列，
+ * 后台下好后会调 ui_redraw()，封面自己就补上了。
+ *
+ * 歌单数据是联网后异步到的，所以这里每帧都跑一遍：数据没到时登记不了，
+ * 数据到了自然就能登记上。cover_request 内部会查缓存去重，重复调用无害。
+ */
 static void ensure_covers(void)
 {
-    if (s_cover_loaded) return;
-    s_cover_loaded = true;
     for (int i = 0; i < 4; i++) {
         if (i < g_music.playlists.count) {
-            cover_get(g_music.playlists.items[i].id,
-                      g_music.playlists.items[i].cover, &s_covers[i]);
-        } else {
-            cover_get(-1 - i, NULL, &s_covers[i]);
+            cover_request(g_music.playlists.items[i].id,
+                          g_music.playlists.items[i].cover);
         }
     }
 }
@@ -111,14 +115,20 @@ static void home_draw(void)
 
     for (int i = 0; i < 4; i++) {
         char label[SONG_NAME_LEN];
+        const cover_t *cv = NULL;
         if (i < g_music.playlists.count) {
             strncpy(label, g_music.playlists.items[i].name, sizeof(label) - 1);
             label[sizeof(label) - 1] = '\0';
+            /* 每帧查一次缓存：后台下好后这帧就能画上真封面 */
+            if (cover_peek(g_music.playlists.items[i].id,
+                           g_music.playlists.items[i].cover, &s_covers[i])) {
+                cv = &s_covers[i];
+            }
         } else {
             strncpy(label, "推荐歌单", sizeof(label) - 1);
             label[sizeof(label) - 1] = '\0';
         }
-        draw_card(i, 0, label, &s_covers[i], ICON_COUNT,
+        draw_card(i, 0, label, cv, ICON_COUNT,
                   focus_row(&s_focus) == 0 && focus_col(&s_focus) == i);
     }
 

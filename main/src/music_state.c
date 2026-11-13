@@ -7,8 +7,13 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "player.h"
 #include "settings.h"
+#include "ui.h"
 
 static const char *TAG = "music";
 
@@ -18,12 +23,118 @@ EXT_RAM_BSS_ATTR music_state_t g_music;
    临时缓冲统一放这里，三处复用。 */
 static EXT_RAM_BSS_ATTR song_list_t s_tmp;
 
+/* ── 歌词后台任务 ────────────────────────────────────────────
+ *
+ * 歌词是 HTTPS 请求，TLS 握手要吃掉好几 KB 栈。UI 主任务只有 12KB 栈，
+ * 在那里做握手会栈溢出 → panic 重启（现象就是「点一下歌卡住然后回到首页」）。
+ * 所以歌词一律放到独立任务里取，取完再通知界面刷新。
+ *
+ * 播放地址则由 player 的音频任务自己取，不经过这里。
+ */
+#define LYRIC_STACK  (12 * 1024)
+
+typedef struct {
+    int64_t id;
+} lyric_req_t;
+
+static QueueHandle_t s_lyric_q;
+static volatile bool  s_lyric_ready;
+/* 歌词缓冲区由后台任务写、UI 任务读，用互斥锁防止读到半截内容 */
+static SemaphoreHandle_t s_lyric_lock;
+
+static void lyric_task(void *arg)
+{
+    (void)arg;
+    lyric_req_t req;
+    /* 结果缓冲放 PSRAM：4KB 歌词 + 栈，不能再挤内部 RAM */
+    static EXT_RAM_BSS_ATTR char lrc_buf[LYRIC_MAX];
+
+    for (;;) {
+        if (xQueueReceive(s_lyric_q, &req, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        ESP_LOGI(TAG, "后台取歌词 id=%lld", (long long)req.id);
+        bool ok = netease_lyric(req.id, lrc_buf, sizeof(lrc_buf));
+
+        xSemaphoreTake(s_lyric_lock, portMAX_DELAY);
+        if (ok) {
+            strncpy(g_music.lyric, lrc_buf, sizeof(g_music.lyric) - 1);
+            g_music.lyric[sizeof(g_music.lyric) - 1] = '\0';
+            g_music.lyric_ok = true;
+        } else {
+            g_music.lyric[0] = '\0';
+            g_music.lyric_ok = false;
+        }
+        xSemaphoreGive(s_lyric_lock);
+
+        if (ok) {
+            ESP_LOGI(TAG, "歌词就绪 id=%lld", (long long)req.id);
+        } else {
+            ESP_LOGW(TAG, "歌词没取到 id=%lld", (long long)req.id);
+        }
+        /* 无论成功失败都要置位：否则播放页会一直停在「歌词加载中」 */
+        s_lyric_ready = true;
+        /* 通知界面重绘，歌词才会显示出来 */
+        ui_redraw();
+    }
+}
+
+static void lyric_request(int64_t id)
+{
+    if (!s_lyric_q) {
+        /* 队列没起来就退化为同步取（只在极早期发生） */
+        g_music.lyric_ok = netease_lyric(id, g_music.lyric, sizeof(g_music.lyric));
+        return;
+    }
+    lyric_req_t r = { .id = id };
+    xQueueSend(s_lyric_q, &r, 0);
+}
+
+/** 歌词是否已经取回来（界面用它决定要不要重新解析） */
+bool music_lyric_ready(void)
+{
+    return s_lyric_ready;
+}
+
+/**
+ * 取歌词到调用方缓冲（线程安全）。
+ * 后台任务正在写 g_music.lyric 时，这里会等它写完，不会读到半截内容。
+ */
+bool music_get_lyric(char *out, size_t cap)
+{
+    if (!out || cap == 0) return false;
+    bool ok;
+    if (s_lyric_lock) {
+        xSemaphoreTake(s_lyric_lock, portMAX_DELAY);
+    }
+    ok = g_music.lyric_ok;
+    strncpy(out, g_music.lyric, cap - 1);
+    out[cap - 1] = '\0';
+    if (s_lyric_lock) {
+        xSemaphoreGive(s_lyric_lock);
+    }
+    return ok && out[0] != '\0';
+}
+
 void music_state_init(void)
 {
     memset(&g_music, 0, sizeof(g_music));
     g_music.current = -1;
     g_music.mode = g_cfg.play_mode;
     strncpy(g_music.list_title, "每日新歌", sizeof(g_music.list_title) - 1);
+
+    s_lyric_q = xQueueCreate(4, sizeof(lyric_req_t));
+    s_lyric_lock = xSemaphoreCreateMutex();
+    if (s_lyric_q && s_lyric_lock) {
+        if (xTaskCreateWithCaps(lyric_task, "lyric", LYRIC_STACK, NULL, 3, NULL,
+                                MALLOC_CAP_SPIRAM) != pdPASS) {
+            ESP_LOGE(TAG, "歌词任务创建失败");
+            s_lyric_q = NULL;
+        }
+    } else {
+        ESP_LOGE(TAG, "歌词队列/锁创建失败");
+        s_lyric_q = NULL;
+    }
 }
 
 static void set_title(const char *s)
@@ -95,9 +206,12 @@ bool music_play_current(void)
     song_t *s = music_current();
     if (!s) return false;
 
-    g_music.lyric_ok = netease_lyric(s->id, g_music.lyric, sizeof(g_music.lyric));
-    if (!g_music.lyric_ok) g_music.lyric[0] = '\0';
     ESP_LOGI(TAG, "播放 %lld %s / %s", (long long)s->id, s->name, s->artist);
+
+    /* 歌词走后台任务：在这里同步取会卡住 UI 甚至栈溢出重启 */
+    s_lyric_ready = false;
+    lyric_request(s->id);
+
     return player_play(s, g_cfg.quality);
 }
 

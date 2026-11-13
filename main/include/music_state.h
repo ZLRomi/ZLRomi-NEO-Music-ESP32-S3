@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "netease.h"
 
@@ -36,8 +37,13 @@ bool music_load_search(const char *keyword);
 
 song_t *music_current(void);
 const char *music_current_title(void);
-bool music_play_current(void);              /* 解析地址 + 取歌词 + 起播 */
+bool music_play_current(void);              /* 起播（歌词走后台，不阻塞） */
 bool music_next(void);
 bool music_prev(void);
 void music_set_mode(int mode);
 const char *music_mode_text(void);
+
+/** 歌词是否已取回（播放页据此决定要不要重新解析歌词） */
+bool music_lyric_ready(void);
+/** 线程安全地取歌词文本；返回 false 表示没有歌词 */
+bool music_get_lyric(char *out, size_t cap);

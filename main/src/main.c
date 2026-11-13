@@ -9,6 +9,7 @@
 #include <stdio.h>
 
 #include "board.h"
+#include "cover.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -93,6 +94,7 @@ void app_main(void)
 
     wifi_mgr_init();
     music_state_init();
+    cover_init();
     player_init();
     player_set_end_callback(on_track_end);
     ui_init();

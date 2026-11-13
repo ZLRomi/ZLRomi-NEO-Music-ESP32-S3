@@ -27,9 +27,8 @@
 
 static focus_t s_focus;
 static int     s_top;
-static EXT_RAM_BSS_ATTR cover_t s_covers[VISIBLE];
-static int64_t s_cover_ids[VISIBLE];
-static bool    s_cover_ok[VISIBLE];
+/* 只用一张临时缓冲：贴图前从后台缓存拷进来，贴完即可复用 */
+static EXT_RAM_BSS_ATTR cover_t s_cover_tmp;
 
 static void songs_enter(void *arg)
 {
@@ -41,10 +40,6 @@ static void songs_enter(void *arg)
         s_focus.index = g_music.current;
     }
     s_top = 0;
-    for (int i = 0; i < VISIBLE; i++) {
-        s_cover_ids[i] = 0;
-        s_cover_ok[i] = false;
-    }
 }
 
 static void ensure_visible(void)
@@ -110,13 +105,10 @@ static void songs_draw(void)
 
         int cx = ROW_X + 4, cy = y + 2;
         bool have = false;
-        for (int k = 0; k < VISIBLE; k++) {
-            if (s_cover_ok[k] && s_cover_ids[k] == s->id) {
-                gfx_blit_scaled(cx, cy, ART, ART,
-                                s_covers[k].px, COVER_W, COVER_H);
-                have = true;
-                break;
-            }
+        /* 直接查后台缓存：命中就贴图，没命中画占位图标 */
+        if (cover_peek(s->id, s->cover, &s_cover_tmp)) {
+            gfx_blit_scaled(cx, cy, ART, ART, s_cover_tmp.px, COVER_W, COVER_H);
+            have = true;
         }
         if (!have) draw_placeholder(cx, cy);
 
@@ -143,7 +135,15 @@ static void songs_draw(void)
     }
 }
 
-/** 每帧只补一张封面，避免一次性发起多个 HTTPS 请求把按键卡住 */
+/**
+ * 封面：只负责登记还没下载的封面。
+ *
+ * 取图由 songs_draw 里的 cover_peek 完成（只读缓存，不阻塞）。
+ * 这里每帧把可见行里尚未缓存的图丢进后台队列，绝不自己下载。
+ *
+ * 原来这里是同步 cover_get（下载 + JPEG 解码），一次阻塞几百毫秒到数秒，
+ * 列表滑动会明显卡顿。
+ */
 static void songs_tick(void)
 {
     ensure_visible();
@@ -151,24 +151,8 @@ static void songs_tick(void)
         int idx = s_top + v;
         if (idx >= g_music.songs.count) break;
         song_t *s = &g_music.songs.items[idx];
-
-        bool already = false;
-        for (int k = 0; k < VISIBLE; k++) {
-            if (s_cover_ok[k] && s_cover_ids[k] == s->id) { already = true; break; }
-        }
-        if (already) continue;
-
-        int slot = -1;
-        for (int k = 0; k < VISIBLE; k++) {
-            if (!s_cover_ok[k]) { slot = k; break; }
-        }
-        if (slot < 0) slot = v;
-
-        cover_get(s->id, s->cover, &s_covers[slot]);
-        s_cover_ids[slot] = s->id;
-        s_cover_ok[slot] = true;
-        ui_redraw();
-        return;
+        /* cover_request 内部会检查缓存，重复登记无害 */
+        cover_request(s->id, s->cover);
     }
 }
 

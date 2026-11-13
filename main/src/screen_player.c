@@ -36,7 +36,12 @@ static int        s_angle;
 static int64_t    s_last_spin;
 static lrc_line_t s_lines[64];
 static int        s_line_count;
+/* 已解析进 s_lines 的歌词属于哪首歌；-1 = 还没解析过 */
 static int        s_lyric_id = -1;
+/* 这首歌的歌词是否已经解析过（区分「同 id 但内容更新」的情况） */
+static bool       s_lyric_parsed;
+/* 从后台任务取歌词的落地缓冲（PSRAM，避免占内部 RAM） */
+static EXT_RAM_BSS_ATTR char s_lrc_buf[LYRIC_MAX];
 
 static void parse_lrc(const char *lrc)
 {
@@ -117,11 +122,39 @@ static void player_enter(void *arg)
     s_last_spin = 0;
 
     song_t *s = music_current();
-    if (s && (int)s->id != s_lyric_id) {
-        s_lyric_id = (int)s->id;
-        parse_lrc(g_music.lyric_ok ? g_music.lyric : NULL);
+    if (s) {
+        /* 歌词是异步取的：这里若已有歌词就立刻用上，否则等后台回调 */
+        if (music_get_lyric(s_lrc_buf, sizeof(s_lrc_buf))) {
+            parse_lrc(s_lrc_buf);
+            s_lyric_id = (int)s->id;
+            s_lyric_parsed = true;
+        } else {
+            s_lyric_parsed = false;
+        }
     }
     ui_redraw();
+}
+
+/**
+ * 歌词是后台异步取的，到得比界面晚。
+ * 这里每帧检查一次：歌词就绪且还没解析过，就重新解析一次并重绘。
+ */
+static void player_check_lyric(void)
+{
+    song_t *s = music_current();
+    if (!s) return;
+    if (s_lyric_parsed && (int)s->id == s_lyric_id) return;
+    if (!music_lyric_ready()) return;
+
+    static EXT_RAM_BSS_ATTR char tmp_lrc[LYRIC_MAX];
+    s_lyric_id = (int)s->id;
+    s_lyric_parsed = true;
+    if (music_get_lyric(s_lrc_buf, sizeof(s_lrc_buf))) {
+        parse_lrc(s_lrc_buf);
+        ESP_LOGI(TAG, "歌词已同步到播放页");
+    } else {
+        parse_lrc(NULL);
+    }
 }
 
 static void draw_time(char *buf, size_t cap, int ms)
@@ -209,8 +242,8 @@ static void player_draw(void)
     /* 歌词：当前行高亮，前后各一行，随时间滚动 */
     int cur = current_lrc_line(pos);
     if (s_line_count == 0) {
-        gfx_text_small(ix, 110, g_music.lyric_ok ? "暂无歌词" : "歌词加载中",
-                       g_theme.text_dim, g_theme.bg);
+        const char *tip = music_lyric_ready() ? "暂无歌词" : "歌词加载中";
+        gfx_text_small(ix, 110, tip, g_theme.text_dim, g_theme.bg);
     } else {
         for (int k = -1; k <= 1; k++) {
             int li = cur + k;
@@ -219,6 +252,14 @@ static void player_draw(void)
             gfx_text_small(ix, y, s_lines[li].text,
                            k == 0 ? g_theme.accent : g_theme.text_dim, g_theme.bg);
         }
+    }
+
+    /* 加载中 / 播放失败：明确告诉用户现在是什么状态，不留空白让人以为死机 */
+    player_state_t pst = player_state();
+    if (pst == PLAYER_LOADING) {
+        gfx_text_center_small(150, "正在获取播放地址…", g_theme.text_dim, g_theme.bg);
+    } else if (pst == PLAYER_ERROR) {
+        gfx_text_center_small(150, "播放失败，按 OK 重试", g_theme.accent, g_theme.bg);
     }
 
     /* 底部按钮：图标 + 文字，焦点始终可见 */
@@ -239,6 +280,7 @@ static void player_draw(void)
 static void player_tick(void)
 {
     int64_t now = esp_timer_get_time() / 1000;
+    player_check_lyric();
     if (player_state() == PLAYER_PLAYING && (now - s_last_spin) > 80) {
         s_last_spin = now;
         s_angle = (s_angle + 6) % 360;
@@ -279,10 +321,17 @@ static bool player_event(input_event_t ev)
     if (focus_move(&s_focus, ev)) return true;
 
     if (ev == EV_OK) {
+        /* 播放失败时，OK 用来重试当前这首 */
+        if (player_state() == PLAYER_ERROR) {
+            if (music_play_current()) {
+                ui_toast("正在重试…");
+            }
+            return true;
+        }
         switch (s_focus.index) {
-        case 0: music_prev(); s_lyric_id = -1; player_enter(NULL); break;
+        case 0: music_prev(); s_lyric_parsed = false; player_enter(NULL); break;
         case 1: player_toggle(); break;
-        case 2: music_next(); s_lyric_id = -1; player_enter(NULL); break;
+        case 2: music_next(); s_lyric_parsed = false; player_enter(NULL); break;
         case 3:
             music_set_mode((g_music.mode + 1) % 3);
             ui_toast(music_mode_text());
