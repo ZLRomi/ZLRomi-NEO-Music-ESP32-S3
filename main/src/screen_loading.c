@@ -14,6 +14,7 @@
 #include "ui.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "gfx.h"
 #include "esp_timer.h"
