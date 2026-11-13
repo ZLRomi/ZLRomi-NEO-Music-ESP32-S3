@@ -672,27 +672,6 @@ bool netease_playlists(playlist_list_t *out)
     ESP_LOGE(TAG, "歌单获取失败（代理与 60s 都不可用）");
     return false;
 }
-    if (fetch_playlists(url, "data", out, 15000) > 0) {
-        ESP_LOGI(TAG, "歌单(60s 榜单) %d 个", out->count);
-        return true;
-    }
-
-    /* 兜底：自建代理推荐歌单 */
-    snprintf(url, sizeof(url), "%s/personalized", PROXY);
-    if (fetch_playlists(url, "result", out, 15000) > 0) {
-        ESP_LOGW(TAG, "60s 不可用，改用代理推荐歌单 %d 个", out->count);
-        return true;
-    }
-
-    /* 再兜底：代理榜单 */
-    snprintf(url, sizeof(url), "%s/toplist", PROXY);
-    if (fetch_playlists(url, "list", out, 15000) > 0) {
-        ESP_LOGW(TAG, "改用代理榜单 %d 个", out->count);
-        return true;
-    }
-    ESP_LOGE(TAG, "歌单获取失败（60s 与代理都不可用）");
-    return false;
-}
 
 bool netease_ranks(playlist_list_t *out)
 {
