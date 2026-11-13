@@ -90,20 +90,28 @@ static void *body_alloc(size_t n)
 }
 
 /**
- * 扩容缓冲。
- * 不能用 realloc：它对 heap_caps 分配的指针不保证保持 PSRAM 属性，
- * 改成「申请新块 + 拷贝 + 释放旧块」。
+ * 扩容缓冲 —— 必须用 heap_caps_realloc。
+ *
+ * ⚠️ 这里以前是「heap_caps_malloc 新块 + memcpy + free 旧块」，是平方级拷贝：
+ *    250KB 的 JSON 按每片约 1KB 到达，会触发 ~80 次扩容，每次都要把整个旧缓冲
+ *    拷一遍（累计约 8MB），而且拷的是 PSRAM（比内部 RAM 慢数倍）。
+ *    实测表现就是「加载一个歌单要 30 秒都出不来」。
+ *
+ * heap_caps_realloc 原地扩容，几乎不拷贝；再配 2 倍增长，
+ * 扩容次数从 ~80 次降到 ~5 次，总拷贝量降到约 500KB。
  */
-static void *body_grow(void *old, size_t old_len, size_t want)
+static void *body_grow(void *old, size_t old_cap, size_t want)
 {
-    void *p = body_alloc(want);
+    void *p = heap_caps_realloc(old, want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) {
-        return NULL;
+        /* PSRAM 里腾不出连续块：退回内部 RAM 再试一次 */
+        p = malloc(want);
+        if (p && old && old_cap) {
+            memcpy(p, old, old_cap);
+        }
+        free(old);
+        return p;
     }
-    if (old && old_len) {
-        memcpy(p, old, old_len);
-    }
-    free(old);
     return p;
 }
 
@@ -112,12 +120,18 @@ static esp_err_t on_http_event(esp_http_client_event_t *e)
     body_t *b = (body_t *)e->user_data;
     if (e->event_id == HTTP_EVENT_ON_DATA && b) {
         if (b->len + e->data_len + 1 > b->cap) {
-            size_t want = b->cap + e->data_len + 2048;
+            /* 翻倍增长，而不是 +2048：
+               2 倍增长下扩容次数是 log 级，总拷贝量 O(n)；
+               +2048 增量下扩容次数是 O(n/片大小)，总拷贝量 O(n²)。 */
+            size_t want = b->cap * 2;
+            if (want < b->cap + e->data_len + 2048) {
+                want = b->cap + e->data_len + 2048;
+            }
             if (want > BODY_MAX) {
                 b->overflow = true;
                 return ESP_FAIL;
             }
-            char *p = body_grow(b->buf, b->len, want);
+            char *p = body_grow(b->buf, b->cap, want);
             if (!p) {
                 b->overflow = true;
                 return ESP_FAIL;
@@ -581,7 +595,7 @@ static int parse_songs(const cJSON *arr, song_list_t *out)
 /* ---------------- 对外接口：列表类 ---------------- */
 
 /* netease_daily 的兜底会用到，先声明 */
-bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out);
+bool netease_playlist_tracks(int64_t playlist_id, int offset, song_list_t *out);
 
 /** 通用：从一个 URL 取 JSON 并挑一个数组字段解析歌单。
  *  60s API 返回 HTTP 200 但 body 里有 code 字段，需显式判断 code==200。
@@ -611,13 +625,53 @@ static int fetch_playlists(const char *url, const char *key, playlist_list_t *ou
     return got;
 }
 
+/*
+ * 数据源优先级（2026-11-13 重排，按实测耗时）：
+ *
+ *   优先用自建代理。之前一度改成 60s 优先，实测是错的：
+ *     - 60s 榜单列表  TTFB 3.02s / 总量 3.85s / 32KB
+ *     - 60s 榜单曲目  TTFB 3.08s / 总量 3.32s / 97KB
+ *     - 60s 单曲信息  00x.split
+ *   代理快得多：
+ *     - /personalized          1.58s / 9.8KB     → 歌单列表首选
+ *     - /playlist/detail       0.82s / 250KB     → 歌单曲目首选（曲目在 playlist.tracks）
+ *     - /personalized/newsong  2.04s / 130KB     → 每日新歌首选
+ *     - /toplist               1.94s / 82KB
+ *
+ * 唯一被网易云风控的是 /playlist/track/all（返回 code:-462 人机验证），
+ * 所以歌单曲目改走 /playlist/detail（曲目嵌在 playlist.tracks 里），绕开风控。
+ *
+ * 60s 保留为兜底：主源挂了还有得看。
+ * 播放地址仍必须走海棠（用户明确要求），不受此优先级影响。
+ */
 bool netease_playlists(playlist_list_t *out)
 {
     out->count = 0;
     char url[192];
 
-    /* 主源：60s 榜单列表，直接当歌单用 */
+    /* 主源：自建代理推荐歌单（最快，1.6s） */
+    snprintf(url, sizeof(url), "%s/personalized?limit=%d", PROXY, PLAYLIST_MAX);
+    if (fetch_playlists(url, "result", out, 10000) > 0) {
+        ESP_LOGI(TAG, "推荐歌单 %d 个", out->count);
+        return true;
+    }
+
+    /* 兜底：60s 榜单列表当歌单用 */
     snprintf(url, sizeof(url), "%s", RANK_LIST);
+    if (fetch_playlists(url, "data", out, 10000) > 0) {
+        ESP_LOGW(TAG, "代理不可用，改用 60s 榜单 %d 个", out->count);
+        return true;
+    }
+
+    /* 再兜底：代理榜单 */
+    snprintf(url, sizeof(url), "%s/toplist", PROXY);
+    if (fetch_playlists(url, "list", out, 10000) > 0) {
+        ESP_LOGW(TAG, "改用代理榜单 %d 个", out->count);
+        return true;
+    }
+    ESP_LOGE(TAG, "歌单获取失败（代理与 60s 都不可用）");
+    return false;
+}
     if (fetch_playlists(url, "data", out, 15000) > 0) {
         ESP_LOGI(TAG, "歌单(60s 榜单) %d 个", out->count);
         return true;
@@ -646,87 +700,16 @@ bool netease_ranks(playlist_list_t *out)
     return netease_playlists(out);
 }
 
-bool netease_daily(song_list_t *out)
+bool netease_daily(int offset, song_list_t *out)
 {
     out->count = 0;
 
-    /* 主源：60s 飙升榜（19723756）当每日新歌用 */
-    if (netease_playlist_tracks(19723756, out)) {
-        ESP_LOGI(TAG, "每日新歌(60s 飙升榜) %d 首", out->count);
-        return true;
-    }
-
-    /* 兜底：自建代理每日新歌 */
-    char url[192];
-    snprintf(url, sizeof(url), "%s/personalized/newsong", PROXY);
-    char *json = http_get(url, NULL, NULL, 0, 15000, 1);
-    if (json) {
-        cJSON *root = cJSON_Parse(json);
-        free(json);
-        if (root) {
-            /* 字段是 result[]，每项里还有一层 song */
-            const cJSON *arr = field(root, "result");
-            if (cJSON_IsArray(arr)) {
-                int n = cJSON_GetArraySize(arr);
-                for (int i = 0; i < n && out->count < SONG_MAX; i++) {
-                    const cJSON *it = cJSON_GetArrayItem(arr, i);
-                    if (!cJSON_IsObject(it)) {
-                        continue;
-                    }
-                    /* 有 song 子对象时用它（完整字段），否则用本体 */
-                    const cJSON *real = field(it, "song");
-                    if (!cJSON_IsObject(real)) {
-                        real = it;
-                    }
-                    song_t *s = &out->items[out->count];
-                    parse_song(real, s);
-                    if (s->id != 0) {
-                        out->count++;
-                    }
-                }
-            }
-            cJSON_Delete(root);
-        }
-    }
-
-    if (out->count > 0) {
-        ESP_LOGW(TAG, "60s 不可用，改用代理每日新歌 %d 首", out->count);
-        return true;
-    }
-    ESP_LOGE(TAG, "每日新歌获取失败");
-    return false;
-}
-
-bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out)
-{
-    out->count = 0;
-    char url[192];
-
-    /* 主源：60s 榜单曲目（榜单 ID 与网易云歌单 ID 通用） */
-    snprintf(url, sizeof(url), RANK_SONG, (long long)playlist_id);
-    char *json = http_get(url, NULL, NULL, 0, 20000, 1);
-    if (json) {
-        cJSON *root = cJSON_Parse(json);
-        free(json);
-        if (root) {
-            /* 60s API 返回 code 字段，code != 200 视为失败 */
-            const cJSON *code_obj = field(root, "code");
-            if (!cJSON_IsNumber(code_obj) || code_obj->valueint != 200) {
-                const char *msg = str_of(root, "message");
-                ESP_LOGW(TAG, "歌单曲目 API 返回错误 code=%d: %s",
-                         code_obj ? code_obj->valueint : -1, msg ? msg : "未知");
-            } else {
-                parse_songs(field(root, "data"), out);
-            }
-            cJSON_Delete(root);
-        }
-    }
-
-    /* 兜底：自建代理歌单曲目（当前常被风控拦成 code:-462，所以只作兜底） */
-    if (out->count == 0) {
-        snprintf(url, sizeof(url), "%s/playlist/track/all?id=%lld&limit=%d&offset=0",
-                 PROXY, (long long)playlist_id, SONG_MAX);
-        json = http_get(url, NULL, NULL, 0, 20000, 1);
+    /* 主源：自建代理每日新歌（快，1.6s；带 offset 翻页） */
+    {
+        char url[192];
+        snprintf(url, sizeof(url), "%s/personalized/newsong?limit=%d&offset=%d",
+                 PROXY, SONG_PAGE, offset);
+        char *json = http_get(url, NULL, NULL, 0, 10000, 0);
         if (json) {
             cJSON *root = cJSON_Parse(json);
             free(json);
@@ -734,23 +717,153 @@ bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out)
                 const cJSON *code_obj = field(root, "code");
                 if (!cJSON_IsNumber(code_obj) || code_obj->valueint != 200) {
                     const char *msg = str_of(root, "message");
-                    ESP_LOGW(TAG, "代理歌单曲目 API 返回错误 code=%d: %s",
+                    ESP_LOGW(TAG, "每日新歌 API 返回 code=%d: %s",
                              code_obj ? code_obj->valueint : -1, msg ? msg : "未知");
                 } else {
-                    parse_songs(field(root, "songs"), out);
+                    /* 字段是 result[]，每项里还有一层 song */
+                    const cJSON *arr = field(root, "result");
+                    if (cJSON_IsArray(arr)) {
+                        int n = cJSON_GetArraySize(arr);
+                        for (int i = 0; i < n && out->count < SONG_PAGE; i++) {
+                            const cJSON *it = cJSON_GetArrayItem(arr, i);
+                            if (!cJSON_IsObject(it)) {
+                                continue;
+                            }
+                            /* 有 song 子对象时用它（完整字段），否则用本体 */
+                            const cJSON *real = field(it, "song");
+                            if (!cJSON_IsObject(real)) {
+                                real = it;
+                            }
+                            song_t *s = &out->items[out->count];
+                            parse_song(real, s);
+                            if (s->id != 0) {
+                                out->count++;
+                            }
+                        }
+                    }
                 }
                 cJSON_Delete(root);
             }
         }
     }
 
-    ESP_LOGI(TAG, "歌单 %lld 取到 %d 首", (long long)playlist_id, out->count);
+    if (out->count > 0) {
+        ESP_LOGI(TAG, "每日新歌第 %d 首起 %d 首", offset, out->count);
+        return true;
+    }
+
+    /* 兜底：60s 飙升榜（19723756） */
+    if (netease_playlist_tracks(19723756, offset, out)) {
+        ESP_LOGW(TAG, "代理不可用，改用 60s 飙升榜 %d 首", out->count);
+        return true;
+    }
+
+    ESP_LOGE(TAG, "每日新歌获取失败");
+    return false;
+}
+
+/**
+ * 取一页歌单曲目（从第 offset 首开始，最多 SONG_PAGE 首）。
+ *
+ * 为什么分页：一次拉整张歌单（250KB JSON）在 ESP32 上要 TLS + cJSON 解析，
+ *   实测加载一个歌单 30 秒出不来。每页 10 首的响应只有 21KB，快一个数量级。
+ *   总页数接口不返回（没有 total 字段），由上层探测：翻到空页即到底。
+ */
+bool netease_playlist_tracks(int64_t playlist_id, int offset, song_list_t *out)
+{
+    out->count = 0;
+    char url[192];
+
+    /* 主源：自建代理歌单曲目（每页 SONG_PAGE 首）。
+       track/all 偶发被网易云风控成 code:-462，但 detail 基本不被拦，
+       所以兜底顺序是 detail → 60s。 */
+    snprintf(url, sizeof(url),
+             "%s/playlist/track/all?id=%lld&limit=%d&offset=%d",
+             PROXY, (long long)playlist_id, SONG_PAGE, offset);
+    char *json = http_get(url, NULL, NULL, 0, 10000, 0);
+    if (json) {
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            const cJSON *code_obj = field(root, "code");
+            if (!cJSON_IsNumber(code_obj) || code_obj->valueint != 200) {
+                const char *msg = str_of(root, "message");
+                ESP_LOGW(TAG, "代理 track/all 返回 code=%d: %s",
+                         code_obj ? code_obj->valueint : -1, msg ? msg : "未知");
+            } else {
+                parse_songs(field(root, "songs"), out);
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    /* 兜底 1：代理 playlist/detail（不风控，但返回全部曲目，只取本页那段） */
+    if (out->count == 0) {
+        snprintf(url, sizeof(url), "%s/playlist/detail?id=%lld",
+                 PROXY, (long long)playlist_id);
+        json = http_get(url, NULL, NULL, 0, 12000, 0);
+        if (json) {
+            cJSON *root = cJSON_Parse(json);
+            free(json);
+            if (root) {
+                const cJSON *pl = field(root, "playlist");
+                const cJSON *arr = pl ? field(pl, "tracks") : NULL;
+                if (cJSON_IsArray(arr)) {
+                    int n = cJSON_GetArraySize(arr);
+                    for (int i = offset; i < n && out->count < SONG_PAGE; i++) {
+                        const cJSON *it = cJSON_GetArrayItem(arr, i);
+                        song_t *s = &out->items[out->count];
+                        parse_song(it, s);
+                        if (s->id != 0) {
+                            out->count++;
+                        }
+                    }
+                }
+                cJSON_Delete(root);
+            }
+        }
+    }
+
+    /* 兜底 2：60s 榜单曲目（榜单 ID 与网易云歌单 ID 通用） */
+    if (out->count == 0) {
+        snprintf(url, sizeof(url), RANK_SONG, (long long)playlist_id);
+        json = http_get(url, NULL, NULL, 0, 10000, 0);
+        if (json) {
+            cJSON *root = cJSON_Parse(json);
+            free(json);
+            if (root) {
+                const cJSON *code_obj = field(root, "code");
+                if (!cJSON_IsNumber(code_obj) || code_obj->valueint != 200) {
+                    const char *msg = str_of(root, "message");
+                    ESP_LOGW(TAG, "歌单曲目 API 返回 code=%d: %s",
+                             code_obj ? code_obj->valueint : -1, msg ? msg : "未知");
+                } else {
+                    const cJSON *arr = field(root, "data");
+                    if (cJSON_IsArray(arr)) {
+                        int n = cJSON_GetArraySize(arr);
+                        for (int i = offset; i < n && out->count < SONG_PAGE; i++) {
+                            const cJSON *it = cJSON_GetArrayItem(arr, i);
+                            song_t *s = &out->items[out->count];
+                            parse_song(it, s);
+                            if (s->id != 0) {
+                                out->count++;
+                            }
+                        }
+                    }
+                }
+                cJSON_Delete(root);
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "歌单 %lld 第 %d 首起 取到 %d 首",
+             (long long)playlist_id, offset, out->count);
     return out->count > 0;
 }
 
-bool netease_rank_songs(int64_t rank_id, song_list_t *out)
+bool netease_rank_songs(int64_t rank_id, int offset, song_list_t *out)
 {
-    return netease_playlist_tracks(rank_id, out);
+    return netease_playlist_tracks(rank_id, offset, out);
 }
 
 bool netease_search(const char *keyword, int offset, song_list_t *out)

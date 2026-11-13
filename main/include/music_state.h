@@ -24,16 +24,17 @@ typedef struct {
     int             mode;
     char            lyric[LYRIC_MAX];
     bool            lyric_ok;
+    /* ── 分页 ──────────────────────────────────────────────
+       列表按页加载（每页 SONG_PAGE 首），避免一次拉整张歌单
+       在 ESP32 上要 TLS + cJSON 解析好几秒。 */
+    int      page;        /* 当前页码，从 0 开始 */
+    int      page_count;  /* 总页数；-1 = 还没探到底 */
+    int64_t  src_id;      /* 列表来源：歌单 id，-1 = 每日新歌，-2 = 搜索 */
 } music_state_t;
 
 extern music_state_t g_music;
 
 void music_state_init(void);
-
-bool music_load_home(void);                 /* 推荐歌单 + 每日新歌 */
-bool music_load_daily(void);
-bool music_load_playlist(int index);
-bool music_load_search(const char *keyword);
 
 /* ── 异步加载（「正在加载」页用） ──────────────────────────────
    同步版在 UI 主任务里发 HTTPS，界面冻住好几秒还没提示；
@@ -50,6 +51,15 @@ void music_load_daily_async(void);
 void music_load_search_async(const char *keyword);
 void music_load_home_async(void);
 load_status_t music_load_status(void);
+
+/* ── 翻页 ──────────────────────────────────────────────────
+   列表页底部「上一页 / 下一页」。超出范围时返回 false 并给出提示。
+   翻页也是异步的：置 LOAD_BUSY，net_task 拉完自动回到列表。 */
+bool music_next_page(void);
+bool music_prev_page(void);
+int  music_page(void);        /* 当前页码，从 0 开始 */
+int  music_page_count(void);  /* 总页数；-1 = 未探到底 */
+bool music_page_busy(void);   /* 翻页请求进行中 */
 
 song_t *music_current(void);
 const char *music_current_title(void);

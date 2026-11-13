@@ -45,16 +45,18 @@ static EXT_RAM_BSS_ATTR song_list_t s_tmp;
 /* 一个队列处理所有网络请求：歌词 / 歌单 / 每日新歌 / 搜索 */
 typedef enum {
     NREQ_LYRIC = 0,
-    NREQ_PLAYLIST,
-    NREQ_DAILY,
-    NREQ_SEARCH,
-    NREQ_HOME,          /* 开机/重连后拉推荐歌单 + 每日新歌 */
+    NREQ_PLAYLIST,      /* index = 歌单下标，offset = 0 */
+    NREQ_DAILY,         /* offset = 第几首起 */
+    NREQ_SEARCH,        /* keyword + offset */
+    NREQ_HOME,          /* 开机/重连：只拉歌单列表 */
+    NREQ_PAGE,          /* 翻页：index = 歌单下标（-1=每日新歌），offset = 第几首起 */
 } net_kind_t;
 
 typedef struct {
     net_kind_t kind;
-    int64_t    id;            /* NREQ_LYRIC */
-    int        index;         /* NREQ_PLAYLIST */
+    int64_t    id;            /* NREQ_LYRIC：歌曲 id */
+    int        index;         /* 歌单下标；NREQ_PAGE 里 -1 表示每日新歌 */
+    int        offset;        /* 起始曲目序号 */
     char       keyword[64];   /* NREQ_SEARCH */
 } net_req_t;
 
@@ -119,37 +121,38 @@ static void net_task(void *arg)
         int  idx = 0;
 
         if (req.kind == NREQ_HOME) {
-            /* 开机/重连：拉推荐歌单 + 每日新歌，两件事独立，一个失败不影响另一个 */
+            /* 开机/重连：只拉歌单列表。每日新歌不在这里预拉 ——
+               用户点进去时走加载页现拉，开机能快一大截。 */
             bool ok_pl = netease_playlists(&g_music.playlists);
             if (!ok_pl) {
                 g_music.playlists.count = 0;
             }
-            bool ok_dl = netease_daily(&s_load_buf);
-            if (ok_dl && s_load_buf.count > 0) {
-                xSemaphoreTake(s_net_lock, portMAX_DELAY);
-                g_music.songs = s_load_buf;
-                g_music.current = 0;
-                set_title("每日新歌");
-                xSemaphoreGive(s_net_lock);
-            }
-            ESP_LOGI(TAG, "首页加载：歌单 %d 个(%s)，每日新歌 %d 首(%s)",
-                     g_music.playlists.count, ok_pl ? "成功" : "失败",
-                     ok_dl ? s_load_buf.count : 0, ok_dl ? "成功" : "失败");
-            s_load_status = (ok_pl || ok_dl) ? LOAD_OK : LOAD_FAIL;
+            ESP_LOGI(TAG, "首页加载：歌单 %d 个(%s)",
+                     g_music.playlists.count, ok_pl ? "成功" : "失败");
+            s_load_status = ok_pl ? LOAD_OK : LOAD_FAIL;
             ui_redraw();
             continue;
         }
 
         if (req.kind == NREQ_DAILY) {
-            ok = netease_daily(&s_load_buf);
+            ok = netease_daily(req.offset, &s_load_buf);
         } else if (req.kind == NREQ_SEARCH) {
-            ok = netease_search(req.keyword, 0, &s_load_buf);
-        } else {
+            ok = netease_search(req.keyword, req.offset, &s_load_buf);
+        } else if (req.kind == NREQ_PAGE) {
+            /* 翻页：回到当前列表所在的那张歌单 / 每日新歌，取指定 offset */
             if (req.index >= 0 && req.index < g_music.playlists.count) {
-                ok = netease_playlist_tracks(g_music.playlists.items[req.index].id,
-                                             &s_load_buf);
+                ok = netease_playlist_tracks(
+                        g_music.playlists.items[req.index].id, req.offset,
+                        &s_load_buf);
                 idx = req.index;
+            } else {
+                ok = netease_daily(req.offset, &s_load_buf);
             }
+        } else if (req.index >= 0 && req.index < g_music.playlists.count) {
+            /* NREQ_PLAYLIST：首页点进来的那一页 */
+            ok = netease_playlist_tracks(
+                    g_music.playlists.items[req.index].id, 0, &s_load_buf);
+            idx = req.index;
         }
 
         if (ok && s_load_buf.count > 0) {
@@ -157,6 +160,23 @@ static void net_task(void *arg)
             xSemaphoreTake(s_net_lock, portMAX_DELAY);
             g_music.songs = s_load_buf;
             g_music.current = 0;
+
+            /* 页码状态：请求里带的是 offset，反推出页码 */
+            int page = req.offset / SONG_PAGE;
+            g_music.page = page;
+            if (req.kind == NREQ_DAILY || req.kind == NREQ_HOME) {
+                g_music.src_id = -1;
+            } else if (req.kind == NREQ_SEARCH) {
+                g_music.src_id = -2;
+            } else if (idx < g_music.playlists.count) {
+                g_music.src_id = g_music.playlists.items[idx].id;
+            }
+            /* 本页没装满 = 已经是最后一页：把总页数钉住。
+               接口不返回 total，只能这样探测。 */
+            if (s_load_buf.count < SONG_PAGE && g_music.page_count < 0) {
+                g_music.page_count = page + 1;
+            }
+
             if (req.kind == NREQ_DAILY) {
                 set_title("每日新歌");
             } else if (req.kind == NREQ_SEARCH) {
@@ -171,10 +191,11 @@ static void net_task(void *arg)
             }
             xSemaphoreGive(s_net_lock);
             s_load_status = LOAD_OK;
-            ESP_LOGI(TAG, "后台列表加载成功：%d 首", g_music.songs.count);
+            ESP_LOGI(TAG, "列表加载成功：第 %d 页（第 %d 首起）%d 首",
+                     page, req.offset, g_music.songs.count);
         } else {
             s_load_status = LOAD_FAIL;
-            ESP_LOGW(TAG, "后台列表加载失败");
+            ESP_LOGW(TAG, "列表加载失败（offset=%d）", req.offset);
         }
         /* 通知界面：加载页据此跳转或提示 */
         ui_redraw();
@@ -275,10 +296,86 @@ void music_load_search_async(const char *keyword)
     net_post(&r);
 }
 
+/* ── 翻页 ──────────────────────────────────────────────────
+ *
+ * 接口不返回 total，总页数靠探测：翻到不满一页就是最后一页。
+ * 所以「下一页」永远允许尝试（失败会停在这一页并提示），
+ * 「上一页」在 page==0 时直接拒绝。
+ *
+ * 当前列表来自哪张歌单，记在 g_music.src_id 里（-1 = 每日新歌，-2 = 搜索）。
+ * 翻页前先用它反查出歌单下标，找不到就说明数据没了，直接放弃。
+ */
+static int src_playlist_index(void)
+{
+    if (g_music.src_id < 0) {
+        return -1;
+    }
+    for (int i = 0; i < g_music.playlists.count; i++) {
+        if (g_music.playlists.items[i].id == g_music.src_id) {
+            return i;
+        }
+    }
+    return -2;   /* 歌单列表换了 / 该歌单已不在榜上 */
+}
+
+static bool page_turn(int new_page)
+{
+    if (!s_net_q) return false;
+    if (s_load_status == LOAD_BUSY) return false;      /* 上次还没翻完 */
+    if (new_page < 0) return false;
+
+    int idx = src_playlist_index();
+    if (idx == -2) {
+        ESP_LOGW(TAG, "翻页失败：当前歌单不在列表里");
+        return false;
+    }
+
+    net_req_t r;
+    memset(&r, 0, sizeof(r));
+    r.kind   = NREQ_PAGE;
+    r.index  = idx;
+    r.offset = new_page * SONG_PAGE;
+    net_post(&r);
+    return true;
+}
+
+bool music_next_page(void)
+{
+    /* 已知总页数且已在末页：别白跑一趟 */
+    if (g_music.page_count >= 0 && g_music.page + 1 >= g_music.page_count) {
+        return false;
+    }
+    return page_turn(g_music.page + 1);
+}
+
+bool music_prev_page(void)
+{
+    if (g_music.page <= 0) return false;
+    return page_turn(g_music.page - 1);
+}
+
+int music_page(void)
+{
+    return g_music.page;
+}
+
+int music_page_count(void)
+{
+    return g_music.page_count;
+}
+
+bool music_page_busy(void)
+{
+    return s_load_status == LOAD_BUSY;
+}
+
 void music_state_init(void)
 {
     memset(&g_music, 0, sizeof(g_music));
     g_music.current = -1;
+    g_music.page = 0;
+    g_music.page_count = -1;      /* -1 = 还没探到底 */
+    g_music.src_id = -1;          /* -1 = 每日新歌 */
     g_music.mode = g_cfg.play_mode;
     strncpy(g_music.list_title, "每日新歌", sizeof(g_music.list_title) - 1);
 
@@ -304,52 +401,6 @@ static void set_title(const char *s)
 {
     strncpy(g_music.list_title, s, sizeof(g_music.list_title) - 1);
     g_music.list_title[sizeof(g_music.list_title) - 1] = '\0';
-}
-
-bool music_load_home(void)
-{
-    /* 歌单与每日新歌各自独立，一个失败不影响另一个 */
-    bool ok_pl = netease_playlists(&g_music.playlists);
-    if (!ok_pl) {
-        g_music.playlists.count = 0;
-    }
-    bool ok_daily = music_load_daily();
-    ESP_LOGI(TAG, "首页加载：歌单 %d 个(%s)，每日新歌 %d 首(%s)",
-             g_music.playlists.count, ok_pl ? "成功" : "失败",
-             g_music.songs.count, ok_daily ? "成功" : "失败");
-    return ok_pl || ok_daily;
-}
-
-bool music_load_daily(void)
-{
-    song_list_t *tmp = &s_tmp;
-    if (!netease_daily(tmp)) return false;
-    g_music.songs = *tmp;
-    g_music.current = tmp->count > 0 ? 0 : -1;
-    set_title("每日新歌");
-    return true;
-}
-
-bool music_load_playlist(int index)
-{
-    if (index < 0 || index >= g_music.playlists.count) return false;
-    song_list_t *tmp = &s_tmp;
-    if (!netease_playlist_tracks(g_music.playlists.items[index].id, tmp)) return false;
-    g_music.songs = *tmp;
-    g_music.current = tmp->count > 0 ? 0 : -1;
-    set_title(g_music.playlists.items[index].name);
-    return true;
-}
-
-bool music_load_search(const char *keyword)
-{
-    if (!keyword || !*keyword) return false;
-    song_list_t *tmp = &s_tmp;
-    if (!netease_search(keyword, 0, tmp)) return false;
-    g_music.songs = *tmp;
-    g_music.current = tmp->count > 0 ? 0 : -1;
-    snprintf(g_music.list_title, sizeof(g_music.list_title), "搜索：%s", keyword);
-    return true;
 }
 
 song_t *music_current(void)

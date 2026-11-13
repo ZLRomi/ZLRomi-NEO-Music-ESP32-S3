@@ -38,12 +38,25 @@
  * 留大一点是为了将来：歌单想一次拉更多首、歌词想存更多行、搜索想翻更多页，
  * 都不用再回头改结构体和内存布局。
  */
+/*
+ * 容量常量。
+ *
+ * 这些结构体（song_list_t / playlist_list_t / music_state_t）全部放在 PSRAM 里，
+ * 所以可以放心往大里留 —— 8MB PSRAM 对这些占用量来说是九牛一毛，
+ * 而内部 RAM 只有约 306KB，寸土寸金。
+ *
+ * 但**下载量**是另一回事：一次拉 50 首的 JSON 有 100KB+，
+ * 在 ESP32 上 TLS 下载 + cJSON 解析要好几秒（实测加载一个歌单 30 秒出不来）。
+ * 所以每页只拉 SONG_PAGE 首，底部放上一页/下一页翻页，
+ * 响应体从 250KB 降到 21KB，快一个数量级。
+ */
 #define SONG_NAME_LEN    64
 #define SONG_ARTIST_LEN  48
 #define SONG_COVER_LEN   192
 #define SONG_URL_LEN     512
 #define PLAYLIST_MAX     16      /* 首页最多展示 16 个歌单 */
-#define SONG_MAX         50      /* 一页最多 50 首 */
+#define SONG_PAGE        10      /* 每页曲目数（也是单次请求拉多少首） */
+#define SONG_MAX         SONG_PAGE  /* song_list_t 只需装得下一页 */
 #define LYRIC_MAX        16384   /* 歌词原文上限：长歌词（尤其逐字）能到十几 KB */
 
 typedef struct {
@@ -74,14 +87,14 @@ typedef struct {
 /* ---- 列表类 ---- */
 /** 推荐歌单（代理 /personalized，失败退 60s 榜单列表） */
 bool netease_playlists(playlist_list_t *out);
-/** 榜单列表（代理 /toplist，失败退 60s 榜单列表） */
+/** 榜单列表（和 netease_playlists 同一份数据） */
 bool netease_ranks(playlist_list_t *out);
-/** 每日新歌（代理 /personalized/newsong，失败退某榜单曲目） */
-bool netease_daily(song_list_t *out);
-/** 歌单曲目（代理 /playlist/track/all，失败退 60s 榜单曲目） */
-bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out);
+/** 每日新歌，从第 offset 首起取一页（代理 /personalized/newsong 优先） */
+bool netease_daily(int offset, song_list_t *out);
+/** 歌单曲目，从第 offset 首起取一页（SONG_PAGE 首） */
+bool netease_playlist_tracks(int64_t playlist_id, int offset, song_list_t *out);
 /** 榜单曲目（同 netease_playlist_tracks，保留语义清晰的别名） */
-bool netease_rank_songs(int64_t rank_id, song_list_t *out);
+bool netease_rank_songs(int64_t rank_id, int offset, song_list_t *out);
 /** 搜索，offset 用于翻页 */
 bool netease_search(const char *keyword, int offset, song_list_t *out);
 
