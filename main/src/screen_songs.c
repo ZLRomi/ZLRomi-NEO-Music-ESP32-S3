@@ -99,15 +99,21 @@ static void songs_draw(void)
     gfx_fill(g_theme.bg);
     ensure_visible();
 
-    char title[96];
-    snprintf(title, sizeof(title), "%s  第 %d/%d 页  %d 首",
-             g_music.list_title, g_music.page + 1,
-             g_music.page_count > 0 ? g_music.page_count : 0,
-             g_music.songs.count);
+    /* 标题与页码分开画：拼接会触发 format-truncation（64+格式文本 > 96），
+       分开还能各自按可用宽度截断，超长也不挤在一起 */
+    char title[SONG_NAME_LEN + 8];
+    snprintf(title, sizeof(title), "%s", g_music.list_title);
     gfx_text_small(8, 4, title, g_theme.accent, g_theme.bg);
-    /* 标题右侧给状态留位（正在翻页时显示提示） */
+    char pg[48];
+    snprintf(pg, sizeof(pg), "第 %d/%d 页 %d 首",
+             g_music.page + 1,
+             g_music.page_count > 0 ? g_music.page_count : 1,
+             g_music.songs.count);
+    int pw = gfx_text_width_small(pg);
+    gfx_text_small(GFX_W - pw - 8, 4, pg, g_theme.text_dim, g_theme.bg);
+    /* 正在翻页时给个明确状态，别让人以为死机 */
     if (music_page_busy()) {
-        gfx_text_small(GFX_W - 96, 4, "加载中…", g_theme.text_dim, g_theme.bg);
+        gfx_text_small(8, 24, "正在加载下一页…", g_theme.text_dim, g_theme.bg);
     }
     gfx_hline(8, GFX_W - 8, 26, g_theme.line);
 
