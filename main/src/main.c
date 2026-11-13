@@ -35,46 +35,23 @@ static void on_track_end(void)
     }
 }
 
-static void load_home_task(void *arg);
 static volatile bool s_loading;
 
+/**
+ * 拿到 IP 后拉首页数据。
+ *
+ * 不再单独起任务：以前这里起 16KB 栈的 load_home_task 专门拉歌单，
+ * 白占 16KB 内部 RAM —— 而内部 RAM 恰恰是 TLS 握手的命门。
+ * 现在直接投递给 net_task 串行处理，数据到了它自己调 ui_redraw()。
+ */
 static void on_wifi_connected(void)
 {
-    /* 连上网才去拉在线数据 */
     if (s_loading) {
         return;
     }
     s_loading = true;
-    /* 栈必须在内部 RAM：PSRAM 栈上跑 HTTPS（TLS 要读 flash 里的证书）会触发
-       esp_task_stack_is_sane_cache_disabled() 断言直接崩溃。 */
-    xTaskCreate(load_home_task, "load_home", 16 * 1024, NULL, 4, NULL);
-}
-
-static void load_home_task(void *arg)
-{
-    (void)arg;
-    /* 必须等 WiFi 真的连上再拉数据：开机就发 HTTPS 请求的话，
-       DNS 还没就绪，首屏歌单必然是空的。等 IP 拿到再请求。 */
-    for (int i = 0; i < 120; i++) {
-        if (wifi_mgr_state() == WIFI_CONNECTED) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-    if (wifi_mgr_state() != WIFI_CONNECTED) {
-        ESP_LOGW(TAG, "WiFi 未连接，先不拉在线数据");
-        return;
-    }
-
-    if (music_load_home()) {
-        ESP_LOGI(TAG, "首页数据就绪：%d 个歌单，%d 首每日新歌",
-                 g_music.playlists.count, g_music.songs.count);
-    } else {
-        ESP_LOGW(TAG, "在线数据暂不可用，界面会显示空列表");
-    }
-    ui_redraw();
-    s_loading = false;      /* 允许下次重连后再拉一次 */
-    vTaskDelete(NULL);
+    music_load_home_async();
+    s_loading = false;
 }
 
 void app_main(void)

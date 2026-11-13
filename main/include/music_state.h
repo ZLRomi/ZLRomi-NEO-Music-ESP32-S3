@@ -48,6 +48,7 @@ typedef enum {
 void music_load_playlist_async(int index);
 void music_load_daily_async(void);
 void music_load_search_async(const char *keyword);
+void music_load_home_async(void);
 load_status_t music_load_status(void);
 
 song_t *music_current(void);
