@@ -20,9 +20,6 @@ static const char *TAG = "music";
 
 EXT_RAM_BSS_ATTR music_state_t g_music;
 
-/* net_task 用的临时列表缓冲（PSRAM），供各请求写入后再拷给 g_music.songs */
-static EXT_RAM_BSS_ATTR song_list_t s_load_buf;
-
 /* ── 歌词后台任务 ────────────────────────────────────────────
  *
  * 歌词是 HTTPS 请求，TLS 握手要吃掉好几 KB 栈。UI 主任务只有 12KB 栈，
@@ -65,7 +62,9 @@ static volatile load_status_t s_load_status = LOAD_IDLE;
 /* 歌词与列表都由后台任务写、UI 读，用互斥锁防止读到半截内容 */
 static SemaphoreHandle_t   s_net_lock;
 
-/* 拉到的列表先落在这里，成功后才整块拷给 g_music.songs */
+/* net_task 的临时落地缓冲（全在 PSRAM）：
+   列表先写进 s_load_buf，成功后再整块拷给 g_music.songs；
+   歌词先写进 s_lrc_buf，再拷给 g_music.lyric */
 static EXT_RAM_BSS_ATTR song_list_t s_load_buf;
 static EXT_RAM_BSS_ATTR char        s_lrc_buf[LYRIC_MAX];
 
@@ -84,7 +83,10 @@ static void net_task(void *arg)
     net_req_t req;
 
     for (;;) {
-        if (xQueueReceive(s_net_q, &req, portMAX_DELAY) != pdTRUE) {
+        /* 5 秒没请求就顺手回收空闲连接：服务端 keep-alive 超时会单方面断开，
+           池里留着死 socket 只会让下一次复用失败 */
+        if (xQueueReceive(s_net_q, &req, pdMS_TO_TICKS(5000)) != pdTRUE) {
+            netease_http_pool_trim();
             continue;
         }
 

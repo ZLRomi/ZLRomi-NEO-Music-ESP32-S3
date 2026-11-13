@@ -37,6 +37,9 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "mbedtls/md.h"
 #include "nvs.h"
 
@@ -57,6 +60,247 @@ static const char *TAG = "netease";
 #define HAI_APP_ID      "qingmusic-android"
 #define HAI_SECRET      "qm-gw-7c1f4e9a2b8d5360e1a7c4f9b2d8036c"
 #define HAI_VERSION     "1.4.0"
+
+/* ── HTTP 连接复用池（按域名复用 TLS 连接，避免每次重做握手） ──────
+ *
+ * 网易云/代理/海棠域名固定，只需 3~4 个长连接。
+ * esp_http_client 本身支持 keep-alive：服务端回 Connection: keep-alive 时，
+ * esp_http_client_perform() 内部把 client 状态退回 HTTP_STATE_CONNECTED，
+ * 下一次 perform 直接复用同一个 socket，跳过 TCP + TLS 握手
+ * （实测首次握手 2~3s，复用后 0.6~0.7s）。
+ * 这里就是「按域名缓存 handle」，用完**不 cleanup**，只清 in_use。
+ *
+ * ⚠️ user_data 只在 init 时绑一次：事件回调里 e->user_data 取的是
+ *    client->user_data（不是 event->user_data），换请求必须用
+ *    esp_http_client_set_user_data() 重新绑定，否则响应体会写进上一个请求
+ *    早已 free 掉的缓冲 —— 那就是随机崩溃。
+ */
+#define MAX_POOL_SIZE      4
+#define POOL_IDLE_MS       30000
+
+typedef struct {
+    char                     host[128];
+    esp_http_client_handle_t cli;
+    int64_t                  last_used_ms;
+    bool                     in_use;
+} http_pool_entry_t;
+
+static http_pool_entry_t s_pool[MAX_POOL_SIZE];
+static int               s_pool_count;
+
+/* 事件回调在后面才定义，这里先声明（建 handle 时要挂进 config） */
+static esp_err_t on_http_event(esp_http_client_event_t *e);
+
+/* 池被 net_task / 音频任务同时用，必须加锁（递归锁：回收时持锁 cleanup） */
+static SemaphoreHandle_t s_pool_lock;
+static bool              s_pool_inited;
+
+static void copy_str(char *dst, size_t cap, const char *src);
+
+static void pool_lock_init(void)
+{
+    if (s_pool_inited) {
+        return;
+    }
+    s_pool_inited = true;
+    s_pool_lock = xSemaphoreCreateRecursiveMutex();
+}
+
+static void lock_pool(void)
+{
+    if (s_pool_lock) {
+        xSemaphoreTakeRecursive(s_pool_lock, portMAX_DELAY);
+    }
+}
+
+static void unlock_pool(void)
+{
+    if (s_pool_lock) {
+        xSemaphoreGiveRecursive(s_pool_lock);
+    }
+}
+
+/* 提取 URL 的 host */
+static void url_parse_host(const char *url, char *host, size_t cap)
+{
+    host[0] = '\0';
+    if (!url) {
+        return;
+    }
+    const char *p = strstr(url, "://");
+    if (!p) {
+        return;
+    }
+    p += 3;
+    const char *q = strchr(p, '/');
+    size_t n = q ? (size_t)(q - p) : strlen(p);
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    memcpy(host, p, n);
+    host[n] = '\0';
+}
+
+/** 销毁一个池项（需已持锁） */
+static void pool_item_cleanup(int i)
+{
+    if (s_pool[i].cli) {
+        esp_http_client_close(s_pool[i].cli);
+        esp_http_client_cleanup(s_pool[i].cli);
+    }
+    s_pool[i].cli = NULL;
+    s_pool[i].host[0] = '\0';
+    s_pool[i].last_used_ms = 0;
+    s_pool[i].in_use = false;
+    if (s_pool_count > 0) {
+        s_pool_count--;
+    }
+}
+
+/* 从池里拿一个同域名的空闲 handle；没有就新建 */
+static esp_http_client_handle_t http_pool_get(const char *url)
+{
+    pool_lock_init();
+    lock_pool();
+
+    char host[128];
+    url_parse_host(url, host, sizeof(host));
+
+    /* 域名不同不能共用一个 handle（Host 头会串），只找同 host 的空闲项 */
+    for (int i = 0; i < MAX_POOL_SIZE; i++) {
+        if (s_pool[i].cli && !s_pool[i].in_use &&
+            strcmp(s_pool[i].host, host) == 0) {
+            s_pool[i].in_use = true;
+            s_pool[i].last_used_ms = esp_timer_get_time() / 1000;
+            unlock_pool();
+            ESP_LOGD(TAG, "复用连接 %s", host);
+            return s_pool[i].cli;
+        }
+    }
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+        .timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler = on_http_event,
+        .keep_alive_enable = true,
+        .buffer_size = 4096,
+    };
+
+    /* 找槽位：优先真正的空槽，其次最久没用的空闲槽 */
+    int idx = -1;
+    for (int i = 0; i < MAX_POOL_SIZE && idx < 0; i++) {
+        if (!s_pool[i].cli) {
+            idx = i;
+        }
+    }
+    if (idx < 0) {
+        int64_t oldest = INT64_MAX;
+        for (int i = 0; i < MAX_POOL_SIZE; i++) {
+            if (!s_pool[i].in_use && s_pool[i].last_used_ms < oldest) {
+                oldest = s_pool[i].last_used_ms;
+                idx = i;
+            }
+        }
+    }
+    if (idx < 0) {
+        /* 池里 4 个全在忙：临时建一个，用完立刻销毁 */
+        unlock_pool();
+        ESP_LOGW(TAG, "连接池已满，临时新建 %s", host);
+        return esp_http_client_init(&cfg);
+    }
+
+    if (s_pool[idx].cli) {
+        pool_item_cleanup(idx);
+    }
+
+    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+    if (!cli) {
+        unlock_pool();
+        return NULL;
+    }
+
+    s_pool[idx].cli = cli;
+    copy_str(s_pool[idx].host, sizeof(s_pool[idx].host), host);
+    s_pool[idx].last_used_ms = esp_timer_get_time() / 1000;
+    s_pool[idx].in_use = true;
+    if (s_pool_count < MAX_POOL_SIZE) {
+        s_pool_count++;
+    }
+    unlock_pool();
+    ESP_LOGI(TAG, "新建连接 %s（池 %d/%d）", host, s_pool_count, MAX_POOL_SIZE);
+    return cli;
+}
+
+/**
+ * perform 失败时销毁 handle。
+ * 服务端 keep-alive 超时断开 / 网络错误后，socket 里可能还堆着半截响应，
+ * 直接归还池会让下一次复用一个脏连接 —— 重试也永远失败。
+ * 所以网络层失败一律销毁，下一次重新握手（贵但稳）。
+ */
+static void http_pool_discard(esp_http_client_handle_t cli)
+{
+    if (!cli) {
+        return;
+    }
+    if (!s_pool_inited || !s_pool_lock) {
+        esp_http_client_close(cli);
+        esp_http_client_cleanup(cli);
+        return;
+    }
+    lock_pool();
+    for (int i = 0; i < MAX_POOL_SIZE; i++) {
+        if (s_pool[i].cli == cli) {
+            pool_item_cleanup(i);
+            unlock_pool();
+            return;
+        }
+    }
+    unlock_pool();
+    /* 不在池里 = 临时 handle */
+    esp_http_client_close(cli);
+    esp_http_client_cleanup(cli);
+}
+
+/* 用完后归还池（不 cleanup，socket 留给下一次复用） */
+static void http_pool_put(esp_http_client_handle_t cli)
+{
+    if (!cli || !s_pool_inited || !s_pool_lock) {
+        return;
+    }
+    lock_pool();
+    for (int i = 0; i < MAX_POOL_SIZE; i++) {
+        if (s_pool[i].cli == cli) {
+            s_pool[i].in_use = false;
+            s_pool[i].last_used_ms = esp_timer_get_time() / 1000;
+            unlock_pool();
+            return;
+        }
+    }
+    unlock_pool();
+    /* 不在池里 = 池满时的临时 handle：直接销毁 */
+    esp_http_client_close(cli);
+    esp_http_client_cleanup(cli);
+}
+
+/* 定期回收空闲太久的连接（服务端会主动断开，留着只是占 socket） */
+void netease_http_pool_trim(void)
+{
+    if (!s_pool_inited || !s_pool_lock) {
+        return;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    lock_pool();
+    for (int i = 0; i < MAX_POOL_SIZE; i++) {
+        if (s_pool[i].cli && !s_pool[i].in_use &&
+            (now - s_pool[i].last_used_ms) > POOL_IDLE_MS) {
+            ESP_LOGI(TAG, "回收空闲连接 %s", s_pool[i].host);
+            pool_item_cleanup(i);
+        }
+    }
+    unlock_pool();
+}
 
 /* 这些站点前面挂 Cloudflare，没有浏览器 UA 会被判 403 / 1015 */
 static const char *UA_BROWSER =
@@ -147,8 +391,15 @@ static esp_err_t on_http_event(esp_http_client_event_t *e)
 }
 
 /**
- * 发起请求并把响应体收进 malloc 的缓冲（调用者 free）。
+ * 发起 GET 并把响应体收进 malloc 的缓冲（调用者 free）。
  * retry：网络层失败时额外重试几次（Cloudflare 偶发 429/1015 时有用）。
+ *
+ * 走连接池：从池按域名拿 handle -> 重新绑 user_data/URL/超时 -> perform -> 归还。
+ * 服务端 keep-alive 时 perform 内部会保留 socket，下一次省掉 TLS 握手。
+ *
+ * ⚠️ 池里的 handle 跨请求长期存在，必须每轮重设：
+ *    1) URL / 超时 / method（handle 是按 GET 创建的，POST 要显式 set_method）
+ *    2) user_data（否则响应体会写进上一轮已 free 的缓冲）
  */
 static char *http_get(const char *url, const char *const *hdr_names,
                       const char *const *hdr_values, int hdr_count,
@@ -166,19 +417,16 @@ static char *http_get(const char *url, const char *const *hdr_names,
         b.buf[0] = '\0';
         b.overflow = false;
 
-        esp_http_client_config_t cfg = {
-            .url = url,
-            .method = HTTP_METHOD_GET,
-            .timeout_ms = timeout_ms,
-            .crt_bundle_attach = esp_crt_bundle_attach,
-            .event_handler = on_http_event,
-            .user_data = &b,
-            .buffer_size = 4096,
-        };
-        esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+        esp_http_client_handle_t cli = http_pool_get(url);
         if (!cli) {
-            continue;
+            ESP_LOGW(TAG, "拿不到 HTTP handle %s", url);
+            break;
         }
+        /* 句柄可能来自池，事件回调与 user_data 必须重新绑定 */
+        esp_http_client_set_url(cli, url);
+        esp_http_client_set_method(cli, HTTP_METHOD_GET);
+        esp_http_client_set_timeout_ms(cli, timeout_ms);
+        esp_http_client_set_user_data(cli, &b);
         esp_http_client_set_header(cli, "User-Agent", UA_BROWSER);
         esp_http_client_set_header(cli, "Accept", "application/json");
         for (int i = 0; i < hdr_count; i++) {
@@ -186,23 +434,39 @@ static char *http_get(const char *url, const char *const *hdr_names,
                 esp_http_client_set_header(cli, hdr_names[i], hdr_values[i]);
             }
         }
+
         esp_err_t err = esp_http_client_perform(cli);
         int status = esp_http_client_get_status_code(cli);
-        esp_http_client_cleanup(cli);
 
         if (err == ESP_OK && status >= 200 && status < 300 && !b.overflow && b.len > 0) {
+            http_pool_put(cli);
             result = b.buf;
             b.buf = NULL;
             break;
         }
-        ESP_LOGW(TAG, "请求失败 %s (err=%s status=%d)", url, esp_err_to_name(err), status);
+        if (err != ESP_OK) {
+            /* 网络层失败：连接多半已废，销毁后稍候重试 */
+            http_pool_discard(cli);
+            ESP_LOGW(TAG, "请求失败 %s (err=%s) 第 %d 次",
+                     url, esp_err_to_name(err), attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(280));
+        } else {
+            /* HTTP 层失败（4xx/5xx）：连接本身还是好的，归还池 */
+            http_pool_put(cli);
+            ESP_LOGW(TAG, "请求失败 %s (status=%d) 第 %d 次",
+                     url, status, attempt + 1);
+        }
     }
 
     free(b.buf);
     return result;
 }
 
-/** POST JSON（海棠网关用） */
+/**
+ * POST JSON（海棠网关用）。
+ * 同样走连接池：海棠两个网关各留一条长连接，切歌/换音质不用重握手。
+ * POST 按文档约定不自动重试（业务失败换网关是上层的事）。
+ */
 static char *http_post_json(const char *url, const char *body,
                             const char *const *hdr_names, const char *const *hdr_values,
                             int hdr_count, int timeout_ms)
@@ -213,20 +477,18 @@ static char *http_post_json(const char *url, const char *body,
     }
     b.buf[0] = '\0';
 
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = timeout_ms,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .event_handler = on_http_event,
-        .user_data = &b,
-        .buffer_size = 4096,
-    };
-    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+    esp_http_client_handle_t cli = http_pool_get(url);
     if (!cli) {
+        ESP_LOGW(TAG, "拿不到 HTTP handle %s", url);
         free(b.buf);
         return NULL;
     }
+
+    /* 池里拿出的 handle 必须整轮重设：方法/URL/超时/事件回调/响应缓冲 */
+    esp_http_client_set_url(cli, url);
+    esp_http_client_set_method(cli, HTTP_METHOD_POST);
+    esp_http_client_set_timeout_ms(cli, timeout_ms);
+    esp_http_client_set_user_data(cli, &b);
     esp_http_client_set_header(cli, "User-Agent", UA_BROWSER);
     esp_http_client_set_header(cli, "Accept", "application/json");
     esp_http_client_set_header(cli, "Content-Type", "application/json");
@@ -239,7 +501,12 @@ static char *http_post_json(const char *url, const char *body,
 
     esp_err_t err = esp_http_client_perform(cli);
     int status = esp_http_client_get_status_code(cli);
-    esp_http_client_cleanup(cli);
+
+    if (err != ESP_OK) {
+        http_pool_discard(cli);     /* 连接已废：销毁，换网关重握手 */
+    } else {
+        http_pool_put(cli);
+    }
 
     if (err != ESP_OK || status < 200 || status >= 300 || b.overflow || b.len == 0) {
         ESP_LOGW(TAG, "POST 失败 %s (err=%s status=%d)", url, esp_err_to_name(err), status);

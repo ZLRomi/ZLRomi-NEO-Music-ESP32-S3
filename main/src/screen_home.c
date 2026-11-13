@@ -3,12 +3,15 @@
  *
  * 4 列 x 2 行焦点网格：上排 4 个推荐歌单（带封面），下排 4 个快捷入口。
  * 方向键移动焦点、OK 打开、SET 由框架统一处理。
+ * 封面走 cover.c 异步管线：cover_peek() 未命中只画占位图标并登记后台下载，
+ * 下一帧自动替换 —— 列表滚动与按键永不等待网络。
  */
 #include "ui.h"
 
 #include <stdio.h>
 #include <string.h>
 
+#include "cover.h"
 #include "esp_attr.h"
 #include "gfx.h"
 #include "icon.h"
@@ -20,13 +23,17 @@
 
 /* 卡片布局：屏幕 320 宽，一行 4 张。
  * (320 - 2*4) / 4 = 78，留 2px 间隙后卡片宽 76。
- * 封面统一存 96x96，卡片里缩到 68 显示。 */
+ * 封面统一存 96x96，卡片里缩到 64 显示，下面留一行歌单名。 */
 #define CARD_W   76
 #define CARD_H   88
 #define CARD_X0  4
 #define CARD_DX  79
 #define CARD_Y0  38
 #define CARD_DY  96
+#define ART_SIZE 64
+
+/* 本卡片封面拷贝缓冲（PSRAM：96x96x2=18KB） */
+static EXT_RAM_BSS_ATTR cover_t s_card_art;
 
 static focus_t s_focus;
 
@@ -37,13 +44,12 @@ static void home_enter(void *arg)
 }
 
 /**
- * 卡片。
- *
- * 首页/列表一律不下载封面：每张都是 20KB 的 PNG/JPEG，还要解码，
- * 列表上下滚会明显卡。封面只在播放详情页出现（用户明确要求）。
- * 所以这里只画图标占位 + 歌单名，始终零网络。
+ * 画一张卡片。
+ * 上排歌单卡：歌单封面（cover_peek 未命中画占位图标，后台下载完自动换）。
+ * 下排快捷卡：程序化几何图标，不涉及网络。
  */
-static void draw_card(int col, int row, const char *label, icon_id_t icon, bool focused)
+static void draw_card(int col, int row, const char *label, icon_id_t icon,
+                      bool focused, int playlist_index)
 {
     int x = CARD_X0 + col * CARD_DX;
     int y = CARD_Y0 + row * CARD_DY;
@@ -54,11 +60,29 @@ static void draw_card(int col, int row, const char *label, icon_id_t icon, bool 
     } else {
         gfx_rect(x, y, x + CARD_W, y + CARD_H, g_theme.surface);
     }
+    uint16_t bg = focused ? g_theme.focus : g_theme.surface;
 
-    uint16_t fg = focused ? g_theme.accent : g_theme.text_dim;
-    if (icon != ICON_COUNT) {
-        gfx_icon(x + (CARD_W - 16) / 2, y + 24, icon, fg);
+    int ax = x + (CARD_W - ART_SIZE) / 2;
+    int ay = y + 2;
+
+    bool have_art = false;
+    if (row == 0 && playlist_index >= 0 && playlist_index < g_music.playlists.count) {
+        playlist_t *p = &g_music.playlists.items[playlist_index];
+        if (p->cover[0]) {
+            have_art = cover_peek(p->id, p->cover, &s_card_art);
+        }
     }
+    if (have_art) {
+        gfx_blit_scaled(ax, ay, ART_SIZE, ART_SIZE, s_card_art.px, COVER_W, COVER_H);
+    } else if (row == 0 && playlist_index >= 0) {
+        /* 歌单卡占位：画一个列表图标占住封面位置 */
+        gfx_icon(x + (CARD_W - 16) / 2, ay + (ART_SIZE - 16) / 2, ICON_LIST,
+                 focused ? g_theme.accent : g_theme.text_dim);
+    } else {
+        gfx_icon(x + (CARD_W - 16) / 2, ay + (ART_SIZE - 16) / 2, icon,
+                 focused ? g_theme.accent : g_theme.text_dim);
+    }
+
     /* 歌单名用小字，卡片 76px 宽能放 4 个汉字 */
     char short_name[25];
     size_t bytes = 0, chars = 0;
@@ -73,10 +97,8 @@ static void draw_card(int col, int row, const char *label, icon_id_t icon, bool 
     }
     short_name[bytes] = '\0';
     int tw = gfx_text_width_small(short_name);
-    /* 卡片高 88，图标占中间，名字落在下方；不放封面所以位置按图标区算 */
-    gfx_text_small(x + (CARD_W - tw) / 2, y + 68, short_name,
-                   focused ? g_theme.text : g_theme.text_dim,
-                   focused ? g_theme.focus : g_theme.surface);
+    gfx_text_small(x + (CARD_W - tw) / 2, y + 70, short_name,
+                   focused ? g_theme.text : g_theme.text_dim, bg);
 }
 
 static void home_draw(void)
@@ -98,8 +120,7 @@ static void home_draw(void)
     gfx_text_small(GFX_W - nw - 8, 6, net, nc, g_theme.bg);
     gfx_hline(8, GFX_W - 8, 32, g_theme.line);
 
-    /* 上排：4 个歌单。封面只在播放页要，这里只放图标 + 名字，零网络 */
-    static const icon_id_t picon[4] = { ICON_LIST, ICON_LIST, ICON_LIST, ICON_LIST };
+    /* 上排：4 个歌单（带封面，异步替换） */
     for (int i = 0; i < 4; i++) {
         char label[SONG_NAME_LEN];
         const char *nm;
@@ -110,8 +131,9 @@ static void home_draw(void)
         }
         strncpy(label, nm, sizeof(label) - 1);
         label[sizeof(label) - 1] = '\0';
-        draw_card(i, 0, label, picon[i],
-                  focus_row(&s_focus) == 0 && focus_col(&s_focus) == i);
+        draw_card(i, 0, label, ICON_LIST,
+                  focus_row(&s_focus) == 0 && focus_col(&s_focus) == i,
+                  i < g_music.playlists.count ? i : -1);
     }
 
     /* 下排：4 个快捷入口 */
@@ -119,7 +141,7 @@ static void home_draw(void)
     static const icon_id_t qicons[4] = { ICON_LIST, ICON_SEARCH, ICON_GEAR, ICON_PLAY };
     for (int i = 0; i < 4; i++) {
         draw_card(i, 1, quick[i], qicons[i],
-                  focus_row(&s_focus) == 1 && focus_col(&s_focus) == i);
+                  focus_row(&s_focus) == 1 && focus_col(&s_focus) == i, -1);
     }
 }
 

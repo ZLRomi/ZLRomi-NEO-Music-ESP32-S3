@@ -98,6 +98,9 @@ bool netease_rank_songs(int64_t rank_id, int offset, song_list_t *out);
 /** 搜索，offset 用于翻页 */
 bool netease_search(const char *keyword, int offset, song_list_t *out);
 
+/** 后台任务定期调：回收空闲超过 30 秒的池连接（服务端会主动断开） */
+void netease_http_pool_trim(void);
+
 /* ---- 单曲类 ---- */
 /** 歌词（代理 /lyric，失败退 vkeys），写入 LRC 原文 */
 bool netease_lyric(int64_t id, char *out, size_t cap);

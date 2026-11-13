@@ -1,14 +1,16 @@
 /*
  * screen_songs.c —— 歌曲列表（横屏 320x240）
  *
- * 每行都有封面 + 中文歌名 + 歌手；焦点行整行高亮并带左侧琥珀竖线。
- * 封面在 tick 里逐张下载，不阻塞按键响应。
+ * 每行 32x32 封面缩略图 + 中文歌名 + 歌手；焦点行整行高亮并带左侧琥珀竖线。
+ * 封面走 cover.c 的异步管线：draw 时 cover_peek() 只查缓存（未命中顺带登记
+ * 后台下载，立即返回画占位音符），下一帧真图到了自动替换 —— 按键永不阻塞。
  */
 #include "ui.h"
 
 #include <stdio.h>
 #include <string.h>
 
+#include "cover.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "gfx.h"
@@ -22,8 +24,13 @@
 #define VISIBLE   5
 #define ROW_X     6
 #define ROW_W     (GFX_W - 12)
-/* 文字左侧留出的图标位宽（列表不放封面，只放一个小音符） */
-#define ART       28
+/* 封面缩略图 28x28（缓存里是 96x96，gfx_blit_scaled 就近缩放） */
+#define THUMB     28
+/* 封面占的横条宽度：图 + 右侧留白 */
+#define ART       (THUMB + 6)
+
+/* 本行封面拷贝缓冲（PSRAM：96x96x2=18KB，内部 RAM 有一就挤掉 TLS 握手） */
+static EXT_RAM_BSS_ATTR cover_t s_thumb;
 
 static focus_t s_focus;
 static int     s_top;
@@ -68,15 +75,40 @@ static void draw_scroll_text(int x, int y, int maxw, const char *s,
     gfx_text_small(x - off + tw + 20, y, s, fg, bg);
 }
 
+/**
+ * 画一行的 28x28 封面。
+ * cover_peek 未命中时只画音符占位并把下载排进后台队列（永不阻塞）；
+ * 封面就绪后 cover_task 会调 ui_redraw()，下一帧这里自然贴上真图。
+ */
+static void draw_row_art(song_t *s, int x, int y, bool focused)
+{
+    bool hit = false;
+    if (s->cover[0]) {
+        hit = cover_peek(s->id, s->cover, &s_thumb);
+    }
+    if (hit) {
+        gfx_blit_scaled(x, y, THUMB, THUMB, s_thumb.px, COVER_W, COVER_H);
+    } else {
+        gfx_icon(x + (THUMB - 16) / 2, y + (THUMB - 16) / 2, ICON_NOTE,
+                 focused ? g_theme.accent : g_theme.accent_dim);
+    }
+}
+
 static void songs_draw(void)
 {
     gfx_fill(g_theme.bg);
     ensure_visible();
 
     char title[96];
-    snprintf(title, sizeof(title), "%s  %d 首",
-             g_music.list_title, g_music.songs.count);
+    snprintf(title, sizeof(title), "%s  第 %d/%d 页  %d 首",
+             g_music.list_title, g_music.page + 1,
+             g_music.page_count > 0 ? g_music.page_count : 0,
+             g_music.songs.count);
     gfx_text_small(8, 4, title, g_theme.accent, g_theme.bg);
+    /* 标题右侧给状态留位（正在翻页时显示提示） */
+    if (music_page_busy()) {
+        gfx_text_small(GFX_W - 96, 4, "加载中…", g_theme.text_dim, g_theme.bg);
+    }
     gfx_hline(8, GFX_W - 8, 26, g_theme.line);
 
     if (g_music.songs.count == 0) {
@@ -94,10 +126,7 @@ static void songs_draw(void)
         gfx_focus_row(ROW_X, y, ROW_W, ROW_H - 2, focused,
                       (v % 2 == 0) ? g_theme.bg : g_theme.surface);
 
-        /* 左侧一个小音符当序号图标。列表不下载封面：
-           一张就要下 20KB 还要 JPEG 解码，上下滚会明显卡（用户明确要求）。 */
-        gfx_icon(ROW_X + 6, y + 8, ICON_NOTE,
-                 focused ? g_theme.accent : g_theme.accent_dim);
+        draw_row_art(s, ROW_X + 4, y + 4, focused);
 
         uint16_t bg = focused ? g_theme.focus
                               : ((v % 2 == 0) ? g_theme.bg : g_theme.surface);
@@ -120,12 +149,25 @@ static void songs_draw(void)
         }
         gfx_text_small(tx, y + 19, s->artist, g_theme.text_dim, bg);
     }
+
+    /* 底部翻页栏：左右键翻页（上一页/下一页），分页加载的入口就在这 */
+    {
+        int y = GFX_H - 26;
+        gfx_hline(8, GFX_W - 8, y - 4, g_theme.line);
+        char pg[96];
+        if (g_music.page_count > 0) {
+            snprintf(pg, sizeof(pg), "第 %d/%d 页", g_music.page + 1, g_music.page_count);
+        } else {
+            snprintf(pg, sizeof(pg), "第 %d 页", g_music.page + 1);
+        }
+        gfx_text_center_small(y, pg, g_theme.text_dim, g_theme.bg);
+        gfx_text_small(10, y, "左键 上一页", g_theme.text_dim, g_theme.bg);
+        gfx_text_small(GFX_W - 106, y, "右键 下一页", g_theme.text_dim, g_theme.bg);
+    }
 }
 
 static void songs_tick(void)
 {
-    /* 列表不下载封面（用户明确要求：只在播放详情页要），所以这里没有活干。
-       保留 tick 是为了以后加东西不用改 ops 表。 */
     ensure_visible();
 }
 
@@ -133,6 +175,22 @@ static bool songs_event(input_event_t ev)
 {
     if (focus_move(&s_focus, ev)) {
         ensure_visible();
+        return true;
+    }
+    if (ev == EV_RIGHT || ev == EV_RIGHT_REPEAT) {
+        if (music_page_busy()) {
+            ui_toast("正在加载…");
+        } else if (!music_next_page()) {
+            ui_toast(g_music.page_count > 0 ? "已经是最后一页" : "翻页失败");
+        }
+        return true;
+    }
+    if (ev == EV_LEFT || ev == EV_LEFT_REPEAT) {
+        if (music_page_busy()) {
+            ui_toast("正在加载…");
+        } else if (!music_prev_page()) {
+            ui_toast("已经是第一页");
+        }
         return true;
     }
     if (ev == EV_OK) {
