@@ -30,12 +30,13 @@ const uint8_t *font_ascii16(int c)
 
 const uint8_t *font_lookup16(uint32_t cp)
 {
+    /* 小字库用 g_cn16_codepoints（GB2312 + 标点），下标对应 font_cn16.bin */
     int lo = 0;
-    int hi = g_cn_codepoints_count - 1;
+    int hi = g_cn16_codepoints_count - 1;
 
     while (lo <= hi) {
         int      mid = (lo + hi) / 2;
-        uint16_t v   = g_cn_codepoints[mid];
+        uint16_t v   = g_cn16_codepoints[mid];
         if (v == cp) {
             return _binary_font_cn16_bin_start + (size_t)mid * FONT16_CN_BYTES;
         }

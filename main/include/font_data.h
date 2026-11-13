@@ -32,9 +32,13 @@ extern "C" {
 #define FONT16_CN_BYTES    (FONT16_W * FONT16_H / 2)                  /* 128 */
 #define FONT16_ASCII_BYTES (((FONT16_ASCII_W + 1) / 2) * FONT16_H)  /* 80 */
 
-/** @brief GB2312 汉字码位表（升序），下标即字形序号 */
+/** @brief GB2312 汉字码位表（升序），下标即 font_cn.bin 字形序号 */
 extern const uint16_t g_cn_codepoints[];
 extern const int      g_cn_codepoints_count;
+
+/** @brief 小字库专用码位表（GB2312 + 常用标点，升序），下标即 font_cn16.bin 字形序号 */
+extern const uint16_t g_cn16_codepoints[];
+extern const int      g_cn16_codepoints_count;
 
 /**
  * @brief 按 Unicode 码位取字形

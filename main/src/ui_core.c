@@ -198,6 +198,16 @@ void ui_tick(void)
 
         /* 全局规则：RST 短按息屏/唤醒，长按 3 秒进二次确认页 */
         if (ev == EV_RST_LONG) {
+            /* ⚠️ 已经在确认页时不能再 continue 吞掉事件：
+               第二次长按 3 秒必须让 restart_event 收到，它才调 esp_restart()。
+               之前这里无条件 ui_goto + continue，导致二次确认永远无效。 */
+            if (ui_current() == SCR_RESTART) {
+                const screen_ops_t *rs = s_ops[SCR_RESTART];
+                if (rs->on_event && rs->on_event(ev)) {
+                    s_dirty = true;
+                }
+                continue;
+            }
             ui_goto(SCR_RESTART, NULL);
             continue;
         }

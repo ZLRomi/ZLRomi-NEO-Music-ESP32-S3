@@ -42,12 +42,16 @@ ASCII_OUT = os.path.join(MAIN, "font_ascii16.bin")
 
 
 def load_codepoints():
-    """从 font_index.c 解析 GB2312 码位表，顺序必须与字库一致"""
+    """从 font_index.c 解析小字库码位表 g_cn16_codepoints（含标点），
+    顺序必须与 font_cn16.bin 完全一致。
+    不能用 g_cn_codepoints —— 那套是纯 GB2312 汉字，没有标点，
+    歌名里的中文逗号/句号/冒号会全部显示成方块。"""
     with open(INDEX_C, encoding="utf-8") as fh:
         src = fh.read()
-    m = re.search(r"g_cn_codepoints\[\d+\]\s*=\s*\{(.*?)\};", src, re.S)
+    m = re.search(r"g_cn16_codepoints\[\d+\]\s*=\s*\{(.*?)\};", src, re.S)
     if not m:
-        sys.exit("无法在 font_index.c 里找到 g_cn_codepoints")
+        sys.exit("无法在 font_index.c 里找到 g_cn16_codepoints，"
+                 "请先运行过一次码位表更新")
     body = m.group(1)
     cps = [int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{4})", body)]
     return cps
