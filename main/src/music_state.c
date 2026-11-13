@@ -20,9 +20,8 @@ static const char *TAG = "music";
 
 EXT_RAM_BSS_ATTR music_state_t g_music;
 
-/* song_list_t 有 8.6KB，放栈上会直接把主任务栈撑爆（栈只有 12KB）。
-   临时缓冲统一放这里，三处复用。 */
-static EXT_RAM_BSS_ATTR song_list_t s_tmp;
+/* net_task 用的临时列表缓冲（PSRAM），供各请求写入后再拷给 g_music.songs */
+static EXT_RAM_BSS_ATTR song_list_t s_load_buf;
 
 /* ── 歌词后台任务 ────────────────────────────────────────────
  *
