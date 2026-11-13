@@ -68,6 +68,9 @@ static SemaphoreHandle_t   s_net_lock;
 static EXT_RAM_BSS_ATTR song_list_t s_load_buf;
 static EXT_RAM_BSS_ATTR char        s_lrc_buf[LYRIC_MAX];
 
+/* set_title 定义在后面，这里先声明 */
+static void set_title(const char *s);
+
 /**
  * 唯一的网络任务：串行处理歌词、歌单曲目、每日新歌、搜索。
  *
