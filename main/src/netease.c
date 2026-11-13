@@ -583,7 +583,9 @@ static int parse_songs(const cJSON *arr, song_list_t *out)
 /* netease_daily 的兜底会用到，先声明 */
 bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out);
 
-/** 通用：从一个 URL 取 JSON 并挑一个数组字段解析歌单 */
+/** 通用：从一个 URL 取 JSON 并挑一个数组字段解析歌单。
+ *  60s API 返回 HTTP 200 但 body 里有 code 字段，需显式判断 code==200。
+ */
 static int fetch_playlists(const char *url, const char *key, playlist_list_t *out,
                            int timeout_ms)
 {
@@ -594,6 +596,14 @@ static int fetch_playlists(const char *url, const char *key, playlist_list_t *ou
     cJSON *root = cJSON_Parse(json);
     free(json);
     if (!root) {
+        return 0;
+    }
+    /* 60s API 返回 code 字段，code != 200 视为失败 */
+    const cJSON *code_obj = field(root, "code");
+    if (cJSON_IsNumber(code_obj) && code_obj->valueint != 200) {
+        const char *msg = str_of(root, "message");
+        ESP_LOGW(TAG, "API 返回错误 code=%d: %s", code_obj->valueint, msg ? msg : "未知");
+        cJSON_Delete(root);
         return 0;
     }
     int got = parse_playlists(field(root, key), out);
@@ -699,7 +709,15 @@ bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out)
         cJSON *root = cJSON_Parse(json);
         free(json);
         if (root) {
-            parse_songs(field(root, "data"), out);
+            /* 60s API 返回 code 字段，code != 200 视为失败 */
+            const cJSON *code_obj = field(root, "code");
+            if (!cJSON_IsNumber(code_obj) || code_obj->valueint != 200) {
+                const char *msg = str_of(root, "message");
+                ESP_LOGW(TAG, "歌单曲目 API 返回错误 code=%d: %s",
+                         code_obj ? code_obj->valueint : -1, msg ? msg : "未知");
+            } else {
+                parse_songs(field(root, "data"), out);
+            }
             cJSON_Delete(root);
         }
     }
@@ -713,7 +731,14 @@ bool netease_playlist_tracks(int64_t playlist_id, song_list_t *out)
             cJSON *root = cJSON_Parse(json);
             free(json);
             if (root) {
-                parse_songs(field(root, "songs"), out);
+                const cJSON *code_obj = field(root, "code");
+                if (!cJSON_IsNumber(code_obj) || code_obj->valueint != 200) {
+                    const char *msg = str_of(root, "message");
+                    ESP_LOGW(TAG, "代理歌单曲目 API 返回错误 code=%d: %s",
+                             code_obj ? code_obj->valueint : -1, msg ? msg : "未知");
+                } else {
+                    parse_songs(field(root, "songs"), out);
+                }
                 cJSON_Delete(root);
             }
         }
