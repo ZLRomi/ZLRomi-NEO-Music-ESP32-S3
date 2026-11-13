@@ -17,6 +17,7 @@
 
 #include "esp_attr.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -34,7 +35,8 @@ static const char *TAG = "cover";
 #define CACHE_N     12          /* 首页 4 + 列表 5 + 播放页 1，留余量 */
 #define QUEUE_N     24
 #define BODY_MAX    (48 * 1024)
-#define TASK_STACK  8192
+/* 12KB：jpeg_t 结构体本身就在栈上（约 2.3KB），再加 HTTP 客户端开销，8KB 太紧 */
+#define TASK_STACK  (12 * 1024)
 
 /* 这些 CDN 走 HTTPS 需要正常 UA，个别节点对空 UA 直接 403 */
 static const char *UA =
@@ -105,8 +107,10 @@ void cover_init(void)
         return;
     }
     s_ready = true;
-    /* 栈放内部 RAM：要跑 HTTP 客户端与 JPEG 解码，PSRAM 栈配 IDF 的 TLS 不稳 */
-    if (xTaskCreate(cover_task_body, "cover", TASK_STACK, NULL, 4, &s_task) != pdPASS) {
+    /* 栈放 PSRAM：内部 RAM 要留给 WiFi/LWIP 与 mbedTLS。
+       封面任务不碰音频 DMA，PSRAM 栈完全够用。 */
+    if (xTaskCreateWithCaps(cover_task_body, "cover", TASK_STACK, NULL, 4, &s_task,
+                            MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "封面任务创建失败");
         s_ready = false;
         return;

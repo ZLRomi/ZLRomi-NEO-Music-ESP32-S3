@@ -12,12 +12,15 @@
 
 #include "gfx.h"
 #include "esp_attr.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "icon.h"
 #include "music_state.h"
 #include "player.h"
 #include "settings.h"
 #include "theme.h"
+
+static const char *TAG = "player";
 
 #define DISC_SIZE  120
 #define DISC_X     8

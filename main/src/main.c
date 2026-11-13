@@ -102,6 +102,13 @@ void app_main(void)
     ESP_LOGI(TAG, "按键：方向键移动焦点，OK 确认，SET 返回，RST 短按息屏/长按 3 秒重启页");
     ESP_LOGI(TAG, "配网热点：%s", wifi_mgr_ap_ssid());
 
+    /* 内存余量：内部 RAM 最紧张（WiFi+TLS+任务栈都从这里出），
+       PSRAM 反而是富余的一方。启动后打一次，方便判断还能不能再加栈。 */
+    ESP_LOGI(TAG, "内存：内部可用 %u 字节（最大块 %u），PSRAM 可用 %u 字节",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
     wifi_mgr_set_connected_callback(on_wifi_connected);
 
     while (true) {

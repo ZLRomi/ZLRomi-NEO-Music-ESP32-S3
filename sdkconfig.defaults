@@ -30,5 +30,11 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
-# 主线程栈：UI 绘制 + cJSON 解析
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+# 主线程栈：UI 绘制 + 歌词解析 + 唱片渲染
+# 主任务是唯一不能放 PSRAM 的任务（IDF 在 app_main 之前创建它，那时 PSRAM 未初始化），
+# 栈必须从内部 RAM 出。内部 RAM 总共只有 253KB，WiFi/LWIP 与 mbedTLS 也要挤在里面，
+# 所以不能无限加大；16KB 是实测安全值。
+# ⚠️ 这里曾经设成 12KB，因为当时 UI 线程里同步做 HTTPS 取歌词，TLS 握手把栈撑爆，
+#    一点歌就 panic 重启回首页。现已把歌词请求移到独立的后台任务（PSRAM 栈），
+#    主任务不再碰网络，12KB 也够用 —— 加到 16KB 只是给绘制与解析留余量。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
