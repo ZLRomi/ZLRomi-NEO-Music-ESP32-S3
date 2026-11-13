@@ -69,8 +69,7 @@ typedef struct {
     bool     overflow;
 } body_t;
 
-static esp_err_t on_event(esp_http_client_event_t *e)
-{
+static esp_err_t on_event(esp_http_client_event_t *e){
     body_t *b = (body_t *)e->user_data;
     if (e->event_id == HTTP_EVENT_ON_DATA && b) {
         if (b->len + e->data_len + 1 > b->cap) {
@@ -92,6 +91,9 @@ static esp_err_t on_event(esp_http_client_event_t *e)
     }
     return ESP_OK;
 }
+
+/* 后台任务主体（定义在文件末尾，这里先声明） */
+static void cover_task_body(void *arg);
 
 void cover_init(void)
 {
