@@ -49,12 +49,9 @@ static void search_tick(void)
     s_py.submit = false;
     const char *kw = pinyin_text(&s_py);
     if (*kw) {
-        if (music_load_search(kw)) {
-            ui_goto(SCR_SONGS, NULL);
-        } else {
-            ui_toast("没有找到歌曲，换个关键词试试");
-            ui_redraw();
-        }
+        /* 进「正在加载」页，后台搜索，拉完自动跳结果列表。
+           不再在 UI 任务里同步发请求（会冻住界面好几秒）。 */
+        ui_show_loading_search(kw);
     }
 }
 

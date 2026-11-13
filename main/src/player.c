@@ -34,12 +34,16 @@ static int64_t now_ms_simple(void)
 #define READ_CHUNK    (16 * 1024)
 /* 起播前先攒够这么多字节再出声，避免「刚开播就欠载」的连贯抽搐 */
 #define PREBUFFER_MIN (24 * 1024)
-/* 32KB：跑 minimp3 软解 + HTTPS 取播放地址。
-   ⚠️ 栈必须在内部 RAM：音频任务要调 netease_resolve_url()，里面有 NVS 读取，
-      而任务栈在 PSRAM 时调用 flash API 会触发
-      esp_task_stack_is_sane_cache_disabled() 断言直接崩溃。
-      实测日志正是这条断言 —— 「一点歌就闪屏重启」。 */
-#define AUDIO_STACK   (32 * 1024)
+/* 24KB：跑 minimp3 软解 + HTTPS 取播放地址。
+   ⚠️ 两项硬约束：
+   1) 栈必须在内部 RAM：任务栈在 PSRAM 时调用 SPI flash API 会触发
+      esp_task_stack_is_sane_cache_disabled() 断言直接崩溃 ——
+      这正是「一点歌就闪屏重启」的根因（NVS 就在 flash 上）。
+   2) 大小必须小于内部 RAM 的最大连续块。WiFi/LWIP 起来后内部堆只剩约 31KB
+      的最大连续块（实测最大块 31744 字节），设成 32KB 会导致 xTaskCreate 直接
+      失败 → s_q 已建但没人消费 → 队列积满 → 误报「播放地址获取失败」。
+      24KB 是实测能塞进去的值。 */
+#define AUDIO_STACK   (24 * 1024)
 /* I2S DMA 深度：descr 数 × 每帧字节 = 可排队的音频量。
    10×480帧×4字节 ≈ 19KB ≈ 108ms，CPU 被 WiFi 任务抢走时也来得及补。 */
 #define I2S_DESC_NUM  10
@@ -324,9 +328,15 @@ void player_init(void)
         ESP_LOGE(TAG, "命令队列创建失败");
         return;
     }
+    /* 诊断：打印内部 RAM 最大连续块。xTaskCreate 需要一次性连续分配 AUDIO_STACK，
+       如果这里打印出来的值小于 AUDIO_STACK，任务必然创建失败。 */
+    ESP_LOGI(TAG, "建音频任务：需 %d 字节，内部最大连续块 %u 字节",
+             (int)AUDIO_STACK,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     /* 栈放内部 RAM：要跑 TLS 取播放地址，PSRAM 栈上调 flash/NVS 会断言崩溃 */
     if (xTaskCreate(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "音频任务创建失败");
+        ESP_LOGE(TAG, "音频任务创建失败（内部 RAM 最大块不够 %d 字节）",
+                 (int)AUDIO_STACK);
         return;
     }
     s_vol = g_cfg.volume;

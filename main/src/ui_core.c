@@ -24,6 +24,7 @@ static const screen_ops_t *s_ops[SCR_COUNT] = {
     [SCR_SETTINGS] = &g_screen_settings,
     [SCR_WIFI]      = &g_screen_wifi,
     [SCR_RESTART]  = &g_screen_restart,
+    [SCR_LOADING]  = &g_screen_loading,
 };
 
 typedef struct {

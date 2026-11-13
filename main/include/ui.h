@@ -24,6 +24,7 @@ typedef enum {
     SCR_SETTINGS,
     SCR_WIFI,           /* 扫描周围网络 / 输密码 */
     SCR_RESTART,        /* RST 长按 3 秒：二次确认，再长按 3 秒才重启 */
+    SCR_LOADING,        /* 网络加载中：歌单曲目 / 每日新歌，转圈等结果 */
     SCR_COUNT
 } screen_id_t;
 
@@ -55,6 +56,7 @@ extern const screen_ops_t g_screen_search;
 extern const screen_ops_t g_screen_settings;
 extern const screen_ops_t g_screen_wifi;
 extern const screen_ops_t g_screen_restart;
+extern const screen_ops_t g_screen_loading;
 
 void ui_init(void);
 void ui_tick(void);
@@ -65,3 +67,10 @@ void ui_toast(const char *msg);
 
 /* 供各界面查询当前路由 */
 screen_id_t ui_current(void);
+
+/* ── 「正在加载」页 ──────────────────────────────────────────
+   网络请求一律走这里：UI 先跳进来，后台任务去拉，拉完自动跳目标页。
+   ui_show_loading(idx)       idx >= 0 → 拉该下标的歌单，< 0 → 每日新歌
+   ui_show_loading_search(kw) 按关键词搜索 */
+void ui_show_loading(int playlist_index);
+void ui_show_loading_search(const char *keyword);

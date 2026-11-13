@@ -20,6 +20,7 @@ idf_component_register(
                  "src/screen_settings.c"
                  "src/screen_wifi.c"
                  "src/screen_restart.c"
+                 "src/screen_loading.c"
                  "src/font_data.c"
                  "src/font_index.c"
     INCLUDE_DIRS "include"

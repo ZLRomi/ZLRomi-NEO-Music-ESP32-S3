@@ -121,6 +121,117 @@ bool music_get_lyric(char *out, size_t cap)
     return ok && out[0] != '\0';
 }
 
+
+/* ── 列表加载后台任务 ──────────────────────────────────────────
+ *
+ * 歌单曲目 / 每日新歌都是 HTTPS 请求（60s 榜单一次就是 97KB JSON），
+ * 同步做会把 UI 冻住好几秒且界面没有任何提示 —— 用户看到的就是「点了没反应」。
+ * 现在改成：UI 进「正在加载」页，这里在后台拉，拉完把状态置 OK，
+ * 加载页再自动跳到列表。
+ */
+#define LOAD_STACK  (12 * 1024)
+
+/* set_title 定义在后面，这里先声明 */
+static void set_title(const char *s);
+
+typedef enum { LREQ_PLAYLIST, LREQ_DAILY, LREQ_SEARCH } load_kind_t;
+
+typedef struct {
+    load_kind_t kind;
+    int         index;
+    char        keyword[64];   /* LREQ_SEARCH 用 */
+} load_req_t;
+
+static QueueHandle_t       s_load_q;
+static volatile load_status_t s_load_status = LOAD_IDLE;
+static SemaphoreHandle_t   s_load_lock;
+
+/* 拉到的列表先落在这里，成功后才整块拷给 g_music.songs */
+static EXT_RAM_BSS_ATTR song_list_t s_load_buf;
+
+static void load_task(void *arg)
+{
+    (void)arg;
+    load_req_t req;
+    for (;;) {
+        if (xQueueReceive(s_load_q, &req, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        s_load_status = LOAD_BUSY;
+        bool ok = false;
+        int  idx = 0;
+
+        if (req.kind == LREQ_DAILY) {
+            ok = netease_daily(&s_load_buf);
+        } else if (req.kind == LREQ_SEARCH) {
+            ok = netease_search(req.keyword, 0, &s_load_buf);
+        } else {
+            if (req.index >= 0 && req.index < g_music.playlists.count) {
+                ok = netease_playlist_tracks(g_music.playlists.items[req.index].id,
+                                             &s_load_buf);
+                idx = req.index;
+            }
+        }
+
+        if (ok && s_load_buf.count > 0) {
+            /* 拷贝期间上锁，UI 侧不会读到半截列表 */
+            if (s_load_lock) {
+                xSemaphoreTake(s_load_lock, portMAX_DELAY);
+            }
+            g_music.songs = s_load_buf;
+            g_music.current = 0;
+            if (req.kind == LREQ_DAILY) {
+                set_title("每日新歌");
+            } else if (req.kind == LREQ_SEARCH) {
+                char t[64];
+                snprintf(t, sizeof(t), "搜索：%s", req.keyword);
+                set_title(t);
+            } else if (idx < g_music.playlists.count) {
+                set_title(g_music.playlists.items[idx].name);
+            }
+            if (s_load_lock) {
+                xSemaphoreGive(s_load_lock);
+            }
+            s_load_status = LOAD_OK;
+            ESP_LOGI(TAG, "后台列表加载成功：%d 首", g_music.songs.count);
+        } else {
+            s_load_status = LOAD_FAIL;
+            ESP_LOGW(TAG, "后台列表加载失败");
+        }
+        /* 通知界面：加载页据此跳转或提示 */
+        ui_redraw();
+    }
+}
+
+void music_load_playlist_async(int index)
+{
+    if (!s_load_q) return;
+    load_req_t r = { .kind = LREQ_PLAYLIST, .index = index };
+    xQueueSend(s_load_q, &r, 0);
+}
+
+void music_load_daily_async(void)
+{
+    if (!s_load_q) return;
+    load_req_t r = { .kind = LREQ_DAILY, .index = 0 };
+    xQueueSend(s_load_q, &r, 0);
+}
+
+load_status_t music_load_status(void)
+{
+    return s_load_status;
+}
+
+void music_load_search_async(const char *keyword)
+{
+    if (!s_load_q || !keyword || !*keyword) return;
+    load_req_t r;
+    memset(&r, 0, sizeof(r));
+    r.kind = LREQ_SEARCH;
+    strncpy(r.keyword, keyword, sizeof(r.keyword) - 1);
+    xQueueSend(s_load_q, &r, 0);
+}
+
 void music_state_init(void)
 {
     memset(&g_music, 0, sizeof(g_music));
@@ -130,6 +241,8 @@ void music_state_init(void)
 
     s_lyric_q = xQueueCreate(4, sizeof(lyric_req_t));
     s_lyric_lock = xSemaphoreCreateMutex();
+    s_load_q = xQueueCreate(2, sizeof(load_req_t));
+    s_load_lock = xSemaphoreCreateMutex();
     if (s_lyric_q && s_lyric_lock) {
         /* 栈必须在内部 RAM：PSRAM 栈上调用 flash/NVS 会直接断言崩溃 */
         if (xTaskCreate(lyric_task, "lyric", LYRIC_STACK, NULL, 3, NULL) != pdPASS) {
@@ -139,6 +252,20 @@ void music_state_init(void)
     } else {
         ESP_LOGE(TAG, "歌词队列/锁创建失败");
         s_lyric_q = NULL;
+    }
+
+    /* 列表加载任务：12KB 栈，内部 RAM（要跑 TLS，PSRAM 栈会断言崩溃） */
+    if (s_load_q && s_load_lock) {
+        ESP_LOGI(TAG, "建列表加载任务：需 %d 字节，内部最大块 %u",
+                 (int)LOAD_STACK,
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        if (xTaskCreate(load_task, "load", LOAD_STACK, NULL, 3, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "列表加载任务创建失败（内部 RAM 最大块不够）");
+            s_load_q = NULL;
+        }
+    } else {
+        ESP_LOGE(TAG, "列表加载队列/锁创建失败");
+        s_load_q = NULL;
     }
 }
 

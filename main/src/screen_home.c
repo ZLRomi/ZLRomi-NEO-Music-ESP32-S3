@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "cover.h"
 #include "esp_attr.h"
 #include "gfx.h"
 #include "icon.h"
@@ -28,10 +27,8 @@
 #define CARD_DX  79
 #define CARD_Y0  38
 #define CARD_DY  96
-#define CARD_ART 68          /* 卡片里封面显示尺寸 */
 
 static focus_t s_focus;
-static EXT_RAM_BSS_ATTR cover_t s_covers[4];
 
 static void home_enter(void *arg)
 {
@@ -40,27 +37,13 @@ static void home_enter(void *arg)
 }
 
 /**
- * 登记 4 张歌单封面，让后台去下载。
+ * 卡片。
  *
- * 绝不能在这里同步下载 —— 4 张 JPEG 串行下载会把界面冻住好几秒，
- * 从歌单页返回首页还会再冻一次。改成：命中缓存就用，没命中就登记到后台队列，
- * 后台下好后会调 ui_redraw()，封面自己就补上了。
- *
- * 歌单数据是联网后异步到的，所以这里每帧都跑一遍：数据没到时登记不了，
- * 数据到了自然就能登记上。cover_request 内部会查缓存去重，重复调用无害。
+ * 首页/列表一律不下载封面：每张都是 20KB 的 PNG/JPEG，还要解码，
+ * 列表上下滚会明显卡。封面只在播放详情页出现（用户明确要求）。
+ * 所以这里只画图标占位 + 歌单名，始终零网络。
  */
-static void ensure_covers(void)
-{
-    for (int i = 0; i < 4; i++) {
-        if (i < g_music.playlists.count) {
-            cover_request(g_music.playlists.items[i].id,
-                          g_music.playlists.items[i].cover);
-        }
-    }
-}
-
-static void draw_card(int col, int row, const char *label, const cover_t *cover,
-                      icon_id_t icon, bool focused)
+static void draw_card(int col, int row, const char *label, icon_id_t icon, bool focused)
 {
     int x = CARD_X0 + col * CARD_DX;
     int y = CARD_Y0 + row * CARD_DY;
@@ -73,10 +56,7 @@ static void draw_card(int col, int row, const char *label, const cover_t *cover,
     }
 
     uint16_t fg = focused ? g_theme.accent : g_theme.text_dim;
-    if (cover) {
-        gfx_blit_scaled(x + (CARD_W - CARD_ART) / 2, y + 2,
-                        CARD_ART, CARD_ART, cover->px, COVER_W, COVER_H);
-    } else if (icon != ICON_COUNT) {
+    if (icon != ICON_COUNT) {
         gfx_icon(x + (CARD_W - 16) / 2, y + 24, icon, fg);
     }
     /* 歌单名用小字，卡片 76px 宽能放 4 个汉字 */
@@ -101,7 +81,6 @@ static void draw_card(int col, int row, const char *label, const cover_t *cover,
 static void home_draw(void)
 {
     gfx_fill(g_theme.bg);
-    ensure_covers();
 
     /* 顶栏：标题 + 真实 WiFi 状态，没连上绝不显示信号格 */
     gfx_text(8, 2, "NEO 音乐", g_theme.accent, g_theme.bg);
@@ -118,29 +97,27 @@ static void home_draw(void)
     gfx_text_small(GFX_W - nw - 8, 6, net, nc, g_theme.bg);
     gfx_hline(8, GFX_W - 8, 32, g_theme.line);
 
+    /* 上排：4 个歌单。封面只在播放页要，这里只放图标 + 名字，零网络 */
+    static const icon_id_t picon[4] = { ICON_LIST, ICON_LIST, ICON_LIST, ICON_LIST };
     for (int i = 0; i < 4; i++) {
         char label[SONG_NAME_LEN];
-        const cover_t *cv = NULL;
+        const char *nm;
         if (i < g_music.playlists.count) {
-            strncpy(label, g_music.playlists.items[i].name, sizeof(label) - 1);
-            label[sizeof(label) - 1] = '\0';
-            /* 每帧查一次缓存：后台下好后这帧就能画上真封面 */
-            if (cover_peek(g_music.playlists.items[i].id,
-                           g_music.playlists.items[i].cover, &s_covers[i])) {
-                cv = &s_covers[i];
-            }
+            nm = g_music.playlists.items[i].name;
         } else {
-            strncpy(label, "推荐歌单", sizeof(label) - 1);
-            label[sizeof(label) - 1] = '\0';
+            nm = "推荐歌单";
         }
-        draw_card(i, 0, label, cv, ICON_COUNT,
+        strncpy(label, nm, sizeof(label) - 1);
+        label[sizeof(label) - 1] = '\0';
+        draw_card(i, 0, label, picon[i],
                   focus_row(&s_focus) == 0 && focus_col(&s_focus) == i);
     }
 
+    /* 下排：4 个快捷入口 */
     static const char *quick[4] = { "每日新歌", "搜索歌曲", "设置菜单", "正在播放" };
     static const icon_id_t qicons[4] = { ICON_LIST, ICON_SEARCH, ICON_GEAR, ICON_PLAY };
     for (int i = 0; i < 4; i++) {
-        draw_card(i, 1, quick[i], NULL, qicons[i],
+        draw_card(i, 1, quick[i], qicons[i],
                   focus_row(&s_focus) == 1 && focus_col(&s_focus) == i);
     }
 }
@@ -153,21 +130,17 @@ static bool home_event(input_event_t ev)
         int idx = s_focus.index;
         if (idx < 4) {
             if (idx < g_music.playlists.count) {
-                if (!music_load_playlist(idx)) {
-                    ui_toast("歌单加载失败，请检查网络");
-                    return true;
-                }
+                /* 进「正在加载」页，后台拉曲目，拉完自动跳列表 */
+                ui_show_loading(idx);
             } else {
                 ui_toast("该歌单暂不可用");
-                return true;
             }
-            ui_goto(SCR_SONGS, NULL);
             return true;
         }
         switch (idx - 4) {
         case 0:
-            if (!music_load_daily()) ui_toast("每日新歌加载失败");
-            else ui_goto(SCR_SONGS, NULL);
+            /* 每日新歌同样走加载页 */
+            ui_show_loading(-1);
             break;
         case 1:
             ui_goto(SCR_SEARCH, NULL);

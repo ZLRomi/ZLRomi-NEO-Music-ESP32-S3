@@ -35,6 +35,21 @@ bool music_load_daily(void);
 bool music_load_playlist(int index);
 bool music_load_search(const char *keyword);
 
+/* ── 异步加载（「正在加载」页用） ──────────────────────────────
+   同步版在 UI 主任务里发 HTTPS，界面冻住好几秒还没提示；
+   异步版投递给后台任务，UI 去加载页轮询状态。 */
+typedef enum {
+    LOAD_IDLE = 0,
+    LOAD_BUSY,
+    LOAD_OK,
+    LOAD_FAIL,
+} load_status_t;
+
+void music_load_playlist_async(int index);
+void music_load_daily_async(void);
+void music_load_search_async(const char *keyword);
+load_status_t music_load_status(void);
+
 song_t *music_current(void);
 const char *music_current_title(void);
 bool music_play_current(void);              /* 起播（歌词走后台，不阻塞） */

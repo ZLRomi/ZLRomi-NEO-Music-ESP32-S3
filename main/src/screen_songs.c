@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "cover.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "gfx.h"
@@ -23,12 +22,11 @@
 #define VISIBLE   5
 #define ROW_X     6
 #define ROW_W     (GFX_W - 12)
-#define ART       32
+/* 文字左侧留出的图标位宽（列表不放封面，只放一个小音符） */
+#define ART       28
 
 static focus_t s_focus;
 static int     s_top;
-/* 只用一张临时缓冲：贴图前从后台缓存拷进来，贴完即可复用 */
-static EXT_RAM_BSS_ATTR cover_t s_cover_tmp;
 
 static void songs_enter(void *arg)
 {
@@ -48,13 +46,6 @@ static void ensure_visible(void)
     if (idx < s_top) s_top = idx;
     if (idx >= s_top + VISIBLE) s_top = idx - VISIBLE + 1;
     if (s_top < 0) s_top = 0;
-}
-
-static void draw_placeholder(int x, int y)
-{
-    gfx_rect(x, y, x + ART, y + ART, g_theme.surface_hi);
-    gfx_frame(x, y, x + ART, y + ART, g_theme.line);
-    gfx_icon(x + (ART - 16) / 2, y + (ART - 16) / 2, ICON_NOTE, g_theme.accent_dim);
 }
 
 /** 歌名太长就横向滚动（只滚焦点那一行，避免满屏都在动） */
@@ -103,19 +94,15 @@ static void songs_draw(void)
         gfx_focus_row(ROW_X, y, ROW_W, ROW_H - 2, focused,
                       (v % 2 == 0) ? g_theme.bg : g_theme.surface);
 
-        int cx = ROW_X + 4, cy = y + 2;
-        bool have = false;
-        /* 直接查后台缓存：命中就贴图，没命中画占位图标 */
-        if (cover_peek(s->id, s->cover, &s_cover_tmp)) {
-            gfx_blit_scaled(cx, cy, ART, ART, s_cover_tmp.px, COVER_W, COVER_H);
-            have = true;
-        }
-        if (!have) draw_placeholder(cx, cy);
+        /* 左侧一个小音符当序号图标。列表不下载封面：
+           一张就要下 20KB 还要 JPEG 解码，上下滚会明显卡（用户明确要求）。 */
+        gfx_icon(ROW_X + 6, y + 8, ICON_NOTE,
+                 focused ? g_theme.accent : g_theme.accent_dim);
 
         uint16_t bg = focused ? g_theme.focus
                               : ((v % 2 == 0) ? g_theme.bg : g_theme.surface);
-        int tx = ROW_X + ART + 10;
-        int tw = ROW_W - ART - 16;
+        int tx = ROW_X + ART + 8;
+        int tw = ROW_W - ART - 12;
 
         if (focused) {
             draw_scroll_text(tx, y + 1, tw, s->name, g_theme.text, bg);
@@ -135,25 +122,11 @@ static void songs_draw(void)
     }
 }
 
-/**
- * 封面：只负责登记还没下载的封面。
- *
- * 取图由 songs_draw 里的 cover_peek 完成（只读缓存，不阻塞）。
- * 这里每帧把可见行里尚未缓存的图丢进后台队列，绝不自己下载。
- *
- * 原来这里是同步 cover_get（下载 + JPEG 解码），一次阻塞几百毫秒到数秒，
- * 列表滑动会明显卡顿。
- */
 static void songs_tick(void)
 {
+    /* 列表不下载封面（用户明确要求：只在播放详情页要），所以这里没有活干。
+       保留 tick 是为了以后加东西不用改 ops 表。 */
     ensure_visible();
-    for (int v = 0; v < VISIBLE; v++) {
-        int idx = s_top + v;
-        if (idx >= g_music.songs.count) break;
-        song_t *s = &g_music.songs.items[idx];
-        /* cover_request 内部会检查缓存，重复登记无害 */
-        cover_request(s->id, s->cover);
-    }
 }
 
 static bool songs_event(input_event_t ev)

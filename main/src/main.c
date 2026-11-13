@@ -94,10 +94,12 @@ void app_main(void)
     input_init();
 
     wifi_mgr_init();
-    music_state_init();
-    cover_init();
+/* 音频任务最先建：它要 24KB 连续内部 RAM，赶在歌词/封面任务把内部堆碎片化之前，
+   才有最大的连续块可用。 */
     player_init();
     player_set_end_callback(on_track_end);
+    music_state_init();
+    cover_init();
     ui_init();
 
     ESP_LOGI(TAG, "按键：方向键移动焦点，OK 确认，SET 返回，RST 短按息屏/长按 3 秒重启页");
