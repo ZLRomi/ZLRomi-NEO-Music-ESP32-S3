@@ -52,7 +52,8 @@ static int64_t now_ms_simple(void)
 #define I2S_DESC_NUM  12
 #define I2S_FRAME_NUM 480
 
-typedef enum { CMD_PLAY, CMD_STOP, CMD_TOGGLE, CMD_VOL } cmd_type_t;
+/* 暂停不再走命令队列（见 player_toggle 注释），故无 CMD_TOGGLE */
+typedef enum { CMD_PLAY, CMD_STOP, CMD_VOL } cmd_type_t;
 
 typedef struct {
     cmd_type_t type;
