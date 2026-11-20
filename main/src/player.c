@@ -27,13 +27,14 @@ static int64_t now_ms_simple(void)
     return esp_timer_get_time() / 1000;
 }
 
-/* 64KB 输入缓冲。44.1kHz 立体声 16bit = 176KB/s，64KB 约等于 0.36 秒音频，
-   网络抖动一二百毫秒也打得住。原来的 32KB 只有 0.18 秒，一抖就欠载 → 声音抽搐。
-   放 PSRAM（heap_caps_malloc 已在 decode_stream 里指定 SPIRAM）。 */
-#define IN_BUF_SIZE   (64 * 1024)
-#define READ_CHUNK    (16 * 1024)
-/* 起播前先攒够这么多字节再出声，避免「刚开播就欠载」的连贯抽搐 */
-#define PREBUFFER_MIN (24 * 1024)
+/* PSRAM 缓冲：现在 mbedTLS 已挪到 PSRAM、音频任务内部 RAM 也够，
+   加大缓冲不占内部 RAM，是抗网络抖动最直接有效的手段。
+   44.1kHz 立体声 16bit = 176KB/s。 */
+#define IN_BUF_SIZE   (256 * 1024)   /* 约 1.45 秒音频，放 PSRAM */
+#define READ_CHUNK    (32 * 1024)
+/* 起播前攒够 128KB（约 0.73 秒）再出声：
+   网络抖动几百毫秒也不会欠载，这是「声音一卡一卡」的关键修复。 */
+#define PREBUFFER_MIN (128 * 1024)
 /* 24KB：跑 minimp3 软解 + HTTPS 取播放地址。
    ⚠️ 两项硬约束：
    1) 栈必须在内部 RAM：任务栈在 PSRAM 时调用 SPI flash API 会触发
@@ -72,6 +73,9 @@ static volatile int            s_dur_ms;
 static volatile int            s_vol = 70;
 static volatile bool           s_paused;
 static volatile bool           s_stop_req;
+/* I2S TX 是循环 DMA：暂停时仅停止写入，DMA 会一直重复播放最后一小段，
+   听起来就是「暂停没生效」。必须 disable 通道才真正静音。 */
+static bool                    s_i2s_muted;
 static song_t                  s_song;
 
 /* minimp3 解码器自身十几 KB，加上函数内约 15KB scratch，必须 static。
@@ -181,7 +185,7 @@ static void decode_stream(const song_t *song, int quality)
             /* 攒够了、流读完了、或等太久（8 秒）就放行，不能一直卡在这 */
             if (have >= PREBUFFER_MIN) break;
             if (pr == 0 && have > 0) break;
-            if (now_ms_simple() - pre_start > 8000) break;
+            if (now_ms_simple() - pre_start > 15000) break;
         }
         ESP_LOGI(TAG, "预缓冲 %d 字节（耗时 %lld ms）", have,
                  (long long)(now_ms_simple() - pre_start));
@@ -206,8 +210,18 @@ static void decode_stream(const song_t *song, int quality)
         if (s_stop_req) break;
 
         if (s_paused) {
-            vTaskDelay(pdMS_TO_TICKS(40));
+            /* 暂停 = 立刻静音：disable I2S 清掉循环 DMA，否则它会反复播最后一段。
+               同时充分让出 CPU，避免 IDLE 任务饿死触发 WDT。 */
+            if (s_tx && !s_i2s_muted) {
+                i2s_channel_disable(s_tx);
+                s_i2s_muted = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
+        }
+        if (s_i2s_muted && s_tx) {
+            i2s_channel_enable(s_tx);
+            s_i2s_muted = false;
         }
 
         int space = IN_BUF_SIZE - have;
@@ -255,6 +269,15 @@ static void decode_stream(const song_t *song, int quality)
     free(buf);
     esp_http_client_close(cli);
     esp_http_client_cleanup(cli);
+
+    /* 主动停止/切歌时，I2S DMA 里还排着上百毫秒的样本。
+       不 flush 的话这些旧数据会继续播出去 —— 就是「停止了还在叫」。
+       disable + enable 会清零 DMA 队列；下一首 CMD_PLAY 重新 enable 即可。 */
+    if (s_stop_req && s_tx) {
+        i2s_channel_disable(s_tx);
+        i2s_channel_enable(s_tx);
+        s_i2s_muted = false;
+    }
     s_state = PLAYER_IDLE;
 
     /* 只有流自然播完才通知界面接下一首；主动停止或切歌都不触发 */
@@ -282,6 +305,11 @@ static void audio_task(void *arg)
             memcpy(&s_song, &c.song, sizeof(s_song));
             s_stop_req = false;
             s_paused = false;
+            /* 上一首若停在暂停态，I2S 还是 disable 的，这里必须恢复 */
+            if (s_i2s_muted && s_tx) {
+                i2s_channel_enable(s_tx);
+                s_i2s_muted = false;
+            }
             decode_stream(&s_song, c.quality);
             break;
         }
@@ -333,10 +361,12 @@ void player_init(void)
              (int)AUDIO_STACK,
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     /* 栈放内部 RAM：要跑 TLS 取播放地址，PSRAM 栈上调 flash/NVS 会断言崩溃 */
-    /* 音频与 UI 同在 CPU1：CPU0 上 WiFi 驱动(优先级23)会疯狂抢占音频(6)，
-       造成 I2S 欠载、声音一卡一卡。音频优先级高于 UI(1)，要 CPU 时能抢占 UI，
-       自己又不会被 WiFi 抢 —— 两全。 */
-    if (xTaskCreatePinnedToCore(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL, 1) != pdPASS) {
+    /* 音频在 CPU0，UI 独占 CPU1。
+       ⚠️ 音频绝不能和 UI 同核：解码+HTTP 读取会长时间占满 CPU，
+          把 CPU1 的 IDLE 任务饿死 → task_wdt 反复触发、按键/显示卡死、
+          停止后声音停不下来。CPU0 上 WiFi 驱动虽优先级高，但它运行时间很短，
+          不会饿死音频；封面任务已降到优先级 2，更不会抢。 */
+    if (xTaskCreatePinnedToCore(audio_task, "audio", AUDIO_STACK, NULL, 5, NULL, 0) != pdPASS) {
         ESP_LOGE(TAG, "音频任务创建失败（内部 RAM 最大块不够 %d 字节）",
                  (int)AUDIO_STACK);
         return;
