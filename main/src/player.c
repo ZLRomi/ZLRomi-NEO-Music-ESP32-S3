@@ -339,7 +339,7 @@ void player_init(void)
              (int)AUDIO_STACK,
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     /* 栈放内部 RAM：要跑 TLS 取播放地址，PSRAM 栈上调 flash/NVS 会断言崩溃 */
-    if (xTaskCreate(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL) != pdPASS) {
+    if (xTaskCreatePinnedToCore(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL, 0) != pdPASS) {
         ESP_LOGE(TAG, "音频任务创建失败（内部 RAM 最大块不够 %d 字节）",
                  (int)AUDIO_STACK);
         return;

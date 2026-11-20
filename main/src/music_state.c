@@ -90,6 +90,59 @@ typedef struct {
 static pl_cache_t s_pl_cache;                        /* 内部 RAM：NVS 要求 */
 static EXT_RAM_BSS_ATTR playlist_list_t s_pl_buf;    /* 网络拉取的落地缓冲 */
 
+/* ── 曲目页缓存（PSRAM）：点过的歌单/分页下次秒开 ──────────────────
+ * 上游每页要 3~6 秒，二次访问不该再等。
+ * 缓存 key = (来源 id, offset)，来源 id 用歌单 id；每日新歌用 -1，搜索不缓存。
+ * 8 槽 × 每首约 330 字节 ≈ 27KB，PSRAM 里九牛一毛。
+ */
+#define TRACK_CACHE_N  8
+typedef struct {
+    int64_t key_id;
+    int     offset;
+    bool    valid;
+    song_list_t songs;
+} track_cache_t;
+static EXT_RAM_BSS_ATTR track_cache_t s_tcache[TRACK_CACHE_N];
+
+static int tcache_slot(int64_t id, int offset)
+{
+    for (int i = 0; i < TRACK_CACHE_N; i++) {
+        if (s_tcache[i].valid && s_tcache[i].key_id == id &&
+            s_tcache[i].offset == offset) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/** 命中缓存就直接把曲目灌进 g_music，返回 true；调用方需自己持 s_net_lock */
+static bool tcache_apply(int64_t id, int offset)
+{
+    int i = tcache_slot(id, offset);
+    if (i < 0) {
+        return false;
+    }
+    g_music.songs = s_tcache[i].songs;
+    g_music.current = 0;
+    g_music.page = offset / SONG_PAGE;
+    return true;
+}
+
+static void tcache_store(int64_t id, int offset, const song_list_t *list)
+{
+    int i = tcache_slot(id, offset);
+    if (i < 0) {
+        /* 找空位，没有就覆盖最旧的（简单轮转） */
+        static int next_slot;
+        i = next_slot % TRACK_CACHE_N;
+        next_slot++;
+    }
+    s_tcache[i].key_id = id;
+    s_tcache[i].offset = offset;
+    s_tcache[i].songs = *list;
+    s_tcache[i].valid = true;
+}
+
 static bool pl_cache_load(playlist_list_t *out)
 {
     nvs_handle_t h;
@@ -191,6 +244,42 @@ static void net_task(void *arg)
         bool ok = false;
         int  idx = 0;
 
+        /* ── 曲目缓存快速路径 ────────────────────────────────────
+         * 点过/翻过的页直接从 PSRAM 读，秒开；后台仍可再刷新，但先让用户看到内容。
+         * 只缓存歌单/每日新歌，搜索结果不缓存（关键词不同、时效性低）。
+         */
+        if (req.kind == NREQ_PLAYLIST || req.kind == NREQ_PAGE ||
+            req.kind == NREQ_DAILY) {
+            int64_t ck;
+            if (req.kind == NREQ_DAILY) {
+                ck = -1;
+            } else if (req.index >= 0 && req.index < g_music.playlists.count) {
+                ck = g_music.playlists.items[req.index].id;
+            } else {
+                ck = -1;   /* 每日新歌翻页 */
+            }
+            int coff = req.offset;
+            xSemaphoreTake(s_net_lock, portMAX_DELAY);
+            bool hit = tcache_apply(ck, coff);
+            if (hit) {
+                g_music.src_id = ck;
+                g_music.page_count = -1;
+                if (req.kind == NREQ_DAILY) {
+                    set_title("每日新歌");
+                } else if (req.index >= 0 && req.index < g_music.playlists.count) {
+                    set_title(g_music.playlists.items[req.index].name);
+                }
+            }
+            xSemaphoreGive(s_net_lock);
+            if (hit) {
+                s_load_status = LOAD_OK;
+                ESP_LOGI(TAG, "曲目缓存命中 key=%lld off=%d，秒开 %d 首",
+                         (long long)ck, coff, g_music.songs.count);
+                ui_redraw();
+                continue;
+            }
+        }
+
         if (req.kind == NREQ_HOME) {
             /* 开机/重连：只拉歌单列表。每日新歌不预拉，点进去时现拉。 */
             /* 缓存先上屏：上游 6.3 秒，不该让用户对着空首页干等 */
@@ -275,6 +364,12 @@ static void net_task(void *arg)
                 set_title(g_music.playlists.items[idx].name);
             }
             xSemaphoreGive(s_net_lock);
+            /* 成功拉取后写缓存：下次进同一个歌单/页直接命中，不用再等 3~6 秒。
+               搜索结果不缓存（key 会撞）。 */
+            if (req.kind != NREQ_SEARCH) {
+                int64_t ck = (req.kind == NREQ_DAILY) ? -1 : g_music.src_id;
+                tcache_store(ck, req.offset, &s_load_buf);
+            }
             s_load_status = LOAD_OK;
             ESP_LOGI(TAG, "列表加载成功：第 %d 页（第 %d 首起）%d 首",
                      page, req.offset, g_music.songs.count);
@@ -471,7 +566,7 @@ void music_state_init(void)
         ESP_LOGI(TAG, "建网络任务：需 %d 字节，内部最大块 %u",
                  (int)NET_STACK,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-        if (xTaskCreate(net_task, "net", NET_STACK, NULL, 3, NULL) != pdPASS) {
+        if (xTaskCreatePinnedToCore(net_task, "net", NET_STACK, NULL, 3, NULL, 0) != pdPASS) {
             ESP_LOGE(TAG, "网络任务创建失败（内部 RAM 最大块不够 %d 字节）",
                      (int)NET_STACK);
             s_net_q = NULL;

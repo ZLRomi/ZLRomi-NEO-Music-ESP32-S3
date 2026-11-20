@@ -56,7 +56,8 @@ static void on_wifi_connected(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "NEO Music %s / HW-678 ESP32-S3", FW_VERSION);
+    ESP_LOGI(TAG, "NEO Music %s / HW-678 ESP32-S3（UI 在 CPU%d，后台在 CPU0）",
+             FW_VERSION, xPortGetCoreID());
 
     esp_err_t nvs = nvs_flash_init();
     if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {

@@ -155,7 +155,7 @@ void cover_init(void)
     s_ready = true;
     /* 栈必须在内部 RAM：PSRAM 栈上跑 TLS / 读 flash 会断言崩溃。
        缓冲与缓存另用 heap_caps 单独放到 PSRAM，不占内部 RAM。 */
-    if (xTaskCreate(cover_task_body, "cover", TASK_STACK, NULL, 4, &s_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(cover_task_body, "cover", TASK_STACK, NULL, 2, &s_task, 0) != pdPASS) {
         ESP_LOGE(TAG, "封面任务创建失败");
         s_ready = false;
         return;

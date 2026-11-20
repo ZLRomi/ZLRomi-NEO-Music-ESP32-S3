@@ -48,3 +48,7 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 #    一点歌就 panic 重启回首页。现已把歌词请求移到独立的后台任务（PSRAM 栈），
 #    主任务不再碰网络，12KB 也够用 —— 加到 16KB 只是给绘制与解析留余量。
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# UI 主任务独占 CPU1：音频(6)/网络(3)/封面(4)任务都在 CPU0，
+# 否则它们的高优先级会不停抢占 UI，造成按键延迟、画面卡顿。
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
