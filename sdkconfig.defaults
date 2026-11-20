@@ -30,6 +30,16 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
+# 海棠签名要真实时间；单颗 NTP 不通时还有备用（esp_netif_sntp 默认只有 1 个槽）
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# 每条 HTTPS 连接的 mbedTLS 收发缓冲默认要在内部 RAM 里占约 20KB。
+# 连接池 4 条 + 封面下载 + 音频流 = 120KB，而实测内部空闲只有 76KB，
+# 于是 mbedtls_ssl_setup 返回 -0x7F00 (MBEDTLS_ERR_SSL_ALLOC_FAILED)：
+# 封面全挂、播放地址取不到 —— 就是「直接播放失败，按 OK 重试也没用」。
+# N16R8 有 8MB PSRAM，把 mbedTLS 的内存全部挪过去，内部 RAM 留给任务栈与 I2S DMA。
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
 # 主线程栈：UI 绘制 + 歌词解析 + 唱片渲染
 # 主任务是唯一不能放 PSRAM 的任务（IDF 在 app_main 之前创建它，那时 PSRAM 未初始化），
 # 栈必须从内部 RAM 出。内部 RAM 总共只有 253KB，WiFi/LWIP 与 mbedTLS 也要挤在里面，

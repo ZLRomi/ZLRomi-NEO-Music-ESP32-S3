@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -35,6 +36,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_netif_sntp.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -44,6 +46,75 @@
 #include "nvs.h"
 
 static const char *TAG = "netease";
+
+/* ── 系统时间 ────────────────────────────────────────────────────────
+ * 海棠网关拿 Date.now() 校验签名时间戳。实测容差很窄：
+ *   当前时间        → 201 / code 0 / 返回播放 URL
+ *   2020 年（未对时）→ 200 / APP_UPGRADE_REQUIRED
+ *   慢 5 分钟        → 200 / APP_UPGRADE_REQUIRED
+ * 所以只要设备时间没对上，换网关、按 OK 重试一百次也放不出歌。
+ *
+ * 两条保险：
+ *   1) 取址前先等 SNTP（esp_netif_sntp 配了 3 颗服务器）；
+ *   2) 任何 HTTPS 响应都带 RFC1123 的 Date 头，用它直接把系统时间拨准。
+ *      代理/海棠/CDN 全都有，不依赖 UDP 123 能否出网。
+ */
+static bool time_valid(void)
+{
+    return time(NULL) > 1577836800;   /* 2020-01-01 之后才算对过表 */
+}
+
+static void time_sync_from_http_date(const char *s)
+{
+    if (!s || time_valid()) {
+        return;
+    }
+    static const char *mons[12] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+    char wday[8] = "", mon[8] = "", zone[8] = "";
+    int day = 0, year = 0, hh = 0, mm = 0, ss = 0;
+    /* 例：Thu, 20 Nov 2026 19:29:37 GMT */
+    if (sscanf(s, "%7[^,], %d %7s %d %d:%d:%d %7s",
+               wday, &day, mon, &year, &hh, &mm, &ss, zone) != 8) {
+        return;
+    }
+    int mi = 0;
+    for (int i = 0; i < 12; i++) {
+        if (strcasecmp(mon, mons[i]) == 0) {
+            mi = i + 1;
+            break;
+        }
+    }
+    if (mi == 0) {
+        return;
+    }
+    /* days_from_civil（Howard Hinnant）：公历 → Unix 天数，不依赖时区设置 */
+    int y = year - (mi <= 2);
+    int era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (unsigned)((153 * (mi + (mi > 2 ? -3 : 9)) + 2) / 5 + day - 1);
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    time_t sec = (time_t)(era * 146097 + (int)doe - 719468)
+                 + hh * 3600 + mm * 60 + ss;
+    struct timeval tv = { .tv_sec = sec, .tv_usec = 0 };
+    if (settimeofday(&tv, NULL) == 0) {
+        ESP_LOGW(TAG, "系统时间由 HTTP Date 校准：%s", s);
+    }
+}
+
+static bool time_wait_sync(int timeout_ms)
+{
+    if (time_valid()) {
+        return true;
+    }
+    esp_err_t e = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(timeout_ms));
+    if (e == ESP_OK || time_valid()) {
+        return true;
+    }
+    return false;
+}
 
 #define PROXY      "https://netstartapi.zlromi.com"
 #define VIKI       "https://60s.viki.moe/v2/ncm-rank"
@@ -437,6 +508,12 @@ static char *http_get(const char *url, const char *const *hdr_names,
 
         esp_err_t err = esp_http_client_perform(cli);
         int status = esp_http_client_get_status_code(cli);
+        /* 响应头里的 Date 是权威时间：SNTP 不通时靠它把表拨准，
+           否则海棠签名会一直用 1970/2020 的时间戳被拒。 */
+        char *date_hdr = NULL;
+        if (esp_http_client_get_header(cli, "Date", &date_hdr) == ESP_OK) {
+            time_sync_from_http_date(date_hdr);
+        }
 
         if (err == ESP_OK && status >= 200 && status < 300 && !b.overflow && b.len > 0) {
             http_pool_put(cli);
@@ -501,6 +578,10 @@ static char *http_post_json(const char *url, const char *body,
 
     esp_err_t err = esp_http_client_perform(cli);
     int status = esp_http_client_get_status_code(cli);
+    char *date_hdr = NULL;
+    if (esp_http_client_get_header(cli, "Date", &date_hdr) == ESP_OK) {
+        time_sync_from_http_date(date_hdr);
+    }
 
     if (err != ESP_OK) {
         http_pool_discard(cli);     /* 连接已废：销毁，换网关重握手 */
@@ -1231,6 +1312,12 @@ bool netease_resolve_url(int64_t id, int quality, char *url, size_t cap)
 {
     static const char *levels[3] = { "standard", "exhigh", "lossless" };
     const char *level = levels[(quality < 0 || quality > 2) ? 0 : quality];
+
+    /* 未对时的设备签名必定被拒：先等 SNTP，最多 4 秒。
+       开机时前面的歌单/歌词请求一般已经用 HTTP Date 拨过表，这里通常秒过。 */
+    if (!time_wait_sync(4000)) {
+        ESP_LOGE(TAG, "系统时间仍未同步，海棠签名会被拒（请检查网络/NTP）");
+    }
 
     /* ---------- 主源：海棠网关 ---------- */
     char body[160];

@@ -20,6 +20,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -65,6 +66,19 @@ static QueueHandle_t     s_q;
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t      s_task;
 static volatile bool     s_ready;
+
+/* 失败退避表：同一张封面下载失败后 60 秒内不再重试。
+   UI 每 240ms 重绘一次，cover_peek 未命中就重新入队；以前失败的封面会被
+   无限次投进队列，每次都重建一遍 TLS 连接（mbedtls_ssl_setup 返回 -0x7F00），
+   把内部 RAM 吃干 —— 播放地址取不到、按 OK 重试也没用。 */
+#define RECENT_N  16
+#define RETRY_MS  (60 * 1000)
+typedef struct {
+    int64_t id;
+    int64_t stamp;
+    bool    failed;
+} recent_t;
+static EXT_RAM_BSS_ATTR recent_t s_recent[RECENT_N];
 
 typedef struct {
     uint8_t *buf;
@@ -198,9 +212,32 @@ void cover_request(int64_t song_id, const char *url)
     if (!s_ready || !url || !*url) {
         return;
     }
-    /* 已在缓存里就不用排队 */
+    /* 已缓存 / 已排队 / 正在下载 / 刚失败还在冷却期，都不重复入队 */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool have = find_locked(song_id) != NULL;
+    int64_t now = esp_timer_get_time() / 1000;
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < RECENT_N; i++) {
+        if (s_recent[i].id == song_id) {
+            if (!s_recent[i].failed || now - s_recent[i].stamp < RETRY_MS) {
+                have = true;
+            } else {
+                slot = i;           /* 冷却结束，允许再试一次 */
+            }
+            break;
+        }
+        if (s_recent[i].stamp < s_recent[oldest].stamp) {
+            oldest = i;
+        }
+    }
+    if (!have && slot < 0) {
+        slot = oldest;
+    }
+    if (!have) {
+        s_recent[slot].id = song_id;
+        s_recent[slot].stamp = now;
+        s_recent[slot].failed = false;
+    }
     xSemaphoreGive(s_lock);
     if (have) {
         return;
@@ -357,7 +394,18 @@ static void cover_task_body(void *arg)
             continue;
         }
         if (!fetch_one(&r, &s_decode_buf)) {
-            continue;   /* 失败就不入缓存，下一次界面重绘会再排一次 */
+            /* 记下失败时间：60 秒内界面重绘不再重复下载，
+               别让失败的封面无限重建 TLS 连接抢播放要用的内存。 */
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            for (int i = 0; i < RECENT_N; i++) {
+                if (s_recent[i].id == r.id) {
+                    s_recent[i].failed = true;
+                    s_recent[i].stamp = esp_timer_get_time() / 1000;
+                    break;
+                }
+            }
+            xSemaphoreGive(s_lock);
+            continue;
         }
         cache_store(&r, &s_decode_buf);
         ESP_LOGI(TAG, "封面就绪 id=%lld（缓存 %d 张）",

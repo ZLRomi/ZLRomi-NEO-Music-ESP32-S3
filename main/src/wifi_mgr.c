@@ -65,14 +65,18 @@ static void start_sntp(void)
     }
     started = true;
 
-    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    /* 三颗 NTP 轮询：任何一颗不通都能对上时。
+       海棠网关签名用 Date.now()，时间不对 = 播放地址永远取不到。
+       CONFIG_LWIP_SNTP_MAX_SERVERS 已在 sdkconfig.defaults 放到 3。 */
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("ntp.aliyun.com", "time.windows.com", "pool.ntp.org"));
     cfg.start = true;
     esp_err_t err = esp_netif_sntp_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "SNTP 启动失败: %s", esp_err_to_name(err));
         return;
     }
-    ESP_LOGI(TAG, "SNTP 已启动（ntp.aliyun.com）");
+    ESP_LOGI(TAG, "SNTP 已启动（aliyun/windows/pool 三备）");
 }
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)

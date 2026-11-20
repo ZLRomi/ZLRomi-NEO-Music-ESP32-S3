@@ -135,6 +135,8 @@ static void decode_stream(const song_t *song, int quality)
         .timeout_ms = 15000,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = READ_CHUNK,
+        /* 官方外链兜底是 302 跳 CDN；IDF 默认就自动跟随，这里只放宽次数 */
+        .max_redirection_count = 5,
     };
     esp_http_client_handle_t cli = esp_http_client_init(&cfg);
     if (!cli || esp_http_client_open(cli, 0) != ESP_OK) {

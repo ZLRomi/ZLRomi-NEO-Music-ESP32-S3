@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
+#include "nvs.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -68,6 +69,75 @@ static SemaphoreHandle_t   s_net_lock;
 static EXT_RAM_BSS_ATTR song_list_t s_load_buf;
 static EXT_RAM_BSS_ATTR char        s_lrc_buf[LYRIC_MAX];
 
+/* ── 首页歌单缓存 ───────────────────────────────────────────────────
+ * /personalized 上游实测 6.3 秒（PC 直连也一样慢），每次开机干等太难受。
+ * 16 张歌单的 id / 名称 / 封面 URL 压成约 3.2KB blob 存 NVS：
+ *   开机先把缓存塞给 UI（立刻能看能点），网络请求回来再刷新并回写；
+ *   网络失败就继续用旧缓存，不再白屏。
+ * ⚠️ NVS 在 flash 上，读写缓冲必须在内部 RAM，所以 s_pl_cache 不能放 PSRAM。
+ */
+typedef struct {
+    int64_t id;
+    char    name[64];
+    char    cover[128];
+} pl_cache_item_t;
+
+typedef struct {
+    int count;
+    pl_cache_item_t items[PLAYLIST_MAX];
+} pl_cache_t;
+
+static pl_cache_t s_pl_cache;                        /* 内部 RAM：NVS 要求 */
+static EXT_RAM_BSS_ATTR playlist_list_t s_pl_buf;    /* 网络拉取的落地缓冲 */
+
+static bool pl_cache_load(playlist_list_t *out)
+{
+    nvs_handle_t h;
+    size_t len = sizeof(s_pl_cache);
+    if (nvs_open("neo", NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    esp_err_t e = nvs_get_blob(h, "plcache", &s_pl_cache, &len);
+    nvs_close(h);
+    if (e != ESP_OK || len != sizeof(s_pl_cache) ||
+        s_pl_cache.count < 1 || s_pl_cache.count > PLAYLIST_MAX) {
+        return false;
+    }
+    out->count = 0;
+    for (int i = 0; i < s_pl_cache.count; i++) {
+        playlist_t *p = &out->items[out->count];
+        memset(p, 0, sizeof(*p));
+        p->id = s_pl_cache.items[i].id;
+        strncpy(p->name, s_pl_cache.items[i].name, sizeof(p->name) - 1);
+        strncpy(p->cover, s_pl_cache.items[i].cover, sizeof(p->cover) - 1);
+        if (p->id != 0) {
+            out->count++;
+        }
+    }
+    return out->count > 0;
+}
+
+static void pl_cache_save(const playlist_list_t *list)
+{
+    memset(&s_pl_cache, 0, sizeof(s_pl_cache));
+    s_pl_cache.count = list->count > PLAYLIST_MAX ? PLAYLIST_MAX : list->count;
+    for (int i = 0; i < s_pl_cache.count; i++) {
+        s_pl_cache.items[i].id = list->items[i].id;
+        strncpy(s_pl_cache.items[i].name, list->items[i].name,
+                sizeof(s_pl_cache.items[i].name) - 1);
+        strncpy(s_pl_cache.items[i].cover, list->items[i].cover,
+                sizeof(s_pl_cache.items[i].cover) - 1);
+    }
+    nvs_handle_t h;
+    if (nvs_open("neo", NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    if (nvs_set_blob(h, "plcache", &s_pl_cache, sizeof(s_pl_cache)) == ESP_OK) {
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
 /* set_title 定义在后面，这里先声明 */
 static void set_title(const char *s);
 
@@ -122,10 +192,24 @@ static void net_task(void *arg)
         int  idx = 0;
 
         if (req.kind == NREQ_HOME) {
-            /* 开机/重连：只拉歌单列表。每日新歌不在这里预拉 ——
-               用户点进去时走加载页现拉，开机能快一大截。 */
-            bool ok_pl = netease_playlists(&g_music.playlists);
-            if (!ok_pl) {
+            /* 开机/重连：只拉歌单列表。每日新歌不预拉，点进去时现拉。 */
+            /* 缓存先上屏：上游 6.3 秒，不该让用户对着空首页干等 */
+            bool cached = pl_cache_load(&g_music.playlists);
+            if (cached) {
+                s_load_status = LOAD_OK;
+                ui_redraw();
+                ESP_LOGI(TAG, "首页先用缓存歌单 %d 个，后台刷新中",
+                         g_music.playlists.count);
+            }
+            bool ok_pl = netease_playlists(&s_pl_buf);
+            if (ok_pl) {
+                g_music.playlists = s_pl_buf;
+                pl_cache_save(&g_music.playlists);
+            } else if (cached) {
+                ESP_LOGW(TAG, "歌单刷新失败，继续使用缓存 %d 个",
+                         g_music.playlists.count);
+                ok_pl = true;
+            } else {
                 g_music.playlists.count = 0;
             }
             ESP_LOGI(TAG, "首页加载：歌单 %d 个(%s)",
