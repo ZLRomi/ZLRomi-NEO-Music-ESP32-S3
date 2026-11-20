@@ -47,6 +47,7 @@ typedef enum {
     NREQ_SEARCH,        /* keyword + offset */
     NREQ_HOME,          /* 开机/重连：只拉歌单列表 */
     NREQ_PAGE,          /* 翻页：index = 歌单下标（-1=每日新歌），offset = 第几首起 */
+    NREQ_PREFETCH,      /* 后台预取：把歌单首页曲目提前拉进缓存，用户点开即秒显 */
 } net_kind_t;
 
 typedef struct {
@@ -239,6 +240,21 @@ static void net_task(void *arg)
             continue;
         }
 
+        /* 后台预取：静默拉取写缓存，完全不碰 UI 状态，避免界面跳转/闪烁 */
+        if (req.kind == NREQ_PREFETCH) {
+            if (req.index < 0 || req.index >= g_music.playlists.count) {
+                continue;
+            }
+            int64_t pid = g_music.playlists.items[req.index].id;
+            song_list_t tmp;
+            memset(&tmp, 0, sizeof(tmp));
+            if (netease_playlist_tracks(pid, 0, &tmp) && tmp.count > 0) {
+                tcache_store(pid, 0, &tmp);
+                ESP_LOGI(TAG, "预取歌单 %lld 首页 %d 首完成", (long long)pid, tmp.count);
+            }
+            continue;
+        }
+
         /* 以下都是「列表类」请求：走加载页那套状态机 */
         s_load_status = LOAD_BUSY;
         bool ok = false;
@@ -305,6 +321,17 @@ static void net_task(void *arg)
                      g_music.playlists.count, ok_pl ? "成功" : "失败");
             s_load_status = ok_pl ? LOAD_OK : LOAD_FAIL;
             ui_redraw();
+
+            /* 后台预取前 4 个歌单的首页曲目：用户点开时直接命中缓存秒显。
+               串行排在队列末尾，不阻塞界面、也不抢当前列表请求。 */
+            int npre = g_music.playlists.count < 4 ? g_music.playlists.count : 4;
+            for (int i = 0; i < npre; i++) {
+                net_req_t pr;
+                memset(&pr, 0, sizeof(pr));
+                pr.kind = NREQ_PREFETCH;
+                pr.index = i;
+                net_post(&pr);
+            }
             continue;
         }
 
@@ -560,7 +587,7 @@ void music_state_init(void)
     strncpy(g_music.list_title, "每日新歌", sizeof(g_music.list_title) - 1);
 
     /* 只有一个队列、一个任务：歌词 / 歌单 / 每日新歌 / 搜索全部串行走它 */
-    s_net_q = xQueueCreate(6, sizeof(net_req_t));
+    s_net_q = xQueueCreate(10, sizeof(net_req_t));   /* 留余量给 4 个预取请求 */
     s_net_lock = xSemaphoreCreateMutex();
     if (s_net_q && s_net_lock) {
         ESP_LOGI(TAG, "建网络任务：需 %d 字节，内部最大块 %u",

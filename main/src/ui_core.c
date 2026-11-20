@@ -6,6 +6,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "gfx.h"
+#include "player.h"
 #include "settings.h"
 #include "theme.h"
 #include "wifi_mgr.h"
@@ -228,6 +229,11 @@ void ui_tick(void)
             continue;
         }
         if (ev == EV_SET) {
+            /* 从播放页按 SET 返回 = 停止播放。
+               以前 ui_back() 只切界面，音频任务照常播 —— 就是「退出了还在叫」。 */
+            if (ui_current() == SCR_PLAYER) {
+                player_stop();
+            }
             ui_back();
             continue;
         }

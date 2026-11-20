@@ -76,6 +76,7 @@ static volatile bool           s_stop_req;
 /* I2S TX 是循环 DMA：暂停时仅停止写入，DMA 会一直重复播放最后一小段，
    听起来就是「暂停没生效」。必须 disable 通道才真正静音。 */
 static bool                    s_i2s_muted;
+static volatile int            s_i2s_underrun;   /* I2S 写入欠载计数，诊断用 */
 static song_t                  s_song;
 
 /* minimp3 解码器自身十几 KB，加上函数内约 15KB scratch，必须 static。
@@ -113,9 +114,11 @@ static void write_pcm(const mp3dec_frame_info_t *info, int samples)
 
     size_t bytes = (size_t)frames * 2 * sizeof(int16_t);
     size_t written = 0;
-    esp_err_t err = i2s_channel_write(s_tx, s_stereo, bytes, &written, pdMS_TO_TICKS(200));
+    esp_err_t err = i2s_channel_write(s_tx, s_stereo, bytes, &written, pdMS_TO_TICKS(50));
+    /* 不刷屏：I2S 偶发超时是网络抖动，刷日志反而拖慢音频任务。
+       记录到计数器，播放结束时统一报一次。 */
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "I2S 写入失败: %s", esp_err_to_name(err));
+        s_i2s_underrun++;
     }
 }
 
@@ -278,6 +281,8 @@ static void decode_stream(const song_t *song, int quality)
         i2s_channel_enable(s_tx);
         s_i2s_muted = false;
     }
+    ESP_LOGI(TAG, "播放结束：I2S 欠载 %d 次", s_i2s_underrun);
+    s_i2s_underrun = 0;
     s_state = PLAYER_IDLE;
 
     /* 只有流自然播完才通知界面接下一首；主动停止或切歌都不触发 */
@@ -405,6 +410,13 @@ void player_toggle(void)
 
 void player_stop(void)
 {
+    /* 立即静音：直接 disable I2S 清掉循环 DMA，不等命令队列。
+       队列里的 CMD_STOP 仍会发给 audio_task 收尾（关 HTTP 流、置 IDLE）。 */
+    if (s_tx && !s_i2s_muted) {
+        i2s_channel_disable(s_tx);
+        s_i2s_muted = true;
+    }
+    s_state = PLAYER_IDLE;
     if (!s_q) return;
     cmd_t c = { .type = CMD_STOP };
     xQueueSend(s_q, &c, 0);
