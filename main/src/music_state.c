@@ -192,8 +192,9 @@ static void pl_cache_save(const playlist_list_t *list)
     nvs_close(h);
 }
 
-/* set_title 定义在后面，这里先声明 */
+/* set_title / net_post 定义在后面，这里先声明 */
 static void set_title(const char *s);
+static void net_post(net_req_t *r);
 
 /**
  * 唯一的网络任务：串行处理歌词、歌单曲目、每日新歌、搜索。
