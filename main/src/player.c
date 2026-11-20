@@ -45,11 +45,11 @@ static int64_t now_ms_simple(void)
       24KB 是实测能塞进去的值。 */
 #define AUDIO_STACK   (24 * 1024)
 /* I2S DMA 深度。DMA 缓冲必须在内部 RAM（DMA 引擎读不了 PSRAM）。
-   8×480≈15.4KB ≈ 87ms 音频缓冲：UI 每 240ms 重绘一次、歌词到达时还要抢 CPU，
-   有这么深的队列才不至于欠载抽搐。
-   注意别再加：内部 RAM 总共约 306KB，WiFi/LWIP/TLS/4 个任务栈都在抢，
-   实测加到 10×480（19.2KB）时 TLS 握手会直接失败。 */
-#define I2S_DESC_NUM  8
+   12×480≈23KB ≈ 130ms 音频缓冲：网络抖动、UI 重绘、封面解码都不会把缓冲抽空。
+   以前只敢用 8×480，是因为 mbedTLS 的收发缓冲还占着内部 RAM（实测 10×480
+   时 TLS 握手就失败）。现在 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y 把 TLS 挪到
+   PSRAM 了，内部 RAM 腾出来了，可以放心加深 —— 这是声音不卡的关键。 */
+#define I2S_DESC_NUM  12
 #define I2S_FRAME_NUM 480
 
 typedef enum { CMD_PLAY, CMD_STOP, CMD_TOGGLE, CMD_VOL } cmd_type_t;
@@ -194,9 +194,6 @@ static void decode_stream(const song_t *song, int quality)
         while (poll_cmd(&c)) {
             if (c.type == CMD_VOL) {
                 s_vol = c.vol;
-            } else if (c.type == CMD_TOGGLE) {
-                s_paused = !s_paused;
-                s_state = s_paused ? PLAYER_PAUSED : PLAYER_PLAYING;
             } else if (c.type == CMD_STOP) {
                 s_stop_req = true;
             } else if (c.type == CMD_PLAY) {
@@ -277,10 +274,6 @@ static void audio_task(void *arg)
         case CMD_VOL:
             s_vol = c.vol;
             break;
-        case CMD_TOGGLE:
-            s_paused = !s_paused;
-            s_state = s_paused ? PLAYER_PAUSED : PLAYER_PLAYING;
-            break;
         case CMD_STOP:
             s_stop_req = true;
             break;
@@ -339,7 +332,10 @@ void player_init(void)
              (int)AUDIO_STACK,
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     /* 栈放内部 RAM：要跑 TLS 取播放地址，PSRAM 栈上调 flash/NVS 会断言崩溃 */
-    if (xTaskCreatePinnedToCore(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL, 0) != pdPASS) {
+    /* 音频与 UI 同在 CPU1：CPU0 上 WiFi 驱动(优先级23)会疯狂抢占音频(6)，
+       造成 I2S 欠载、声音一卡一卡。音频优先级高于 UI(1)，要 CPU 时能抢占 UI，
+       自己又不会被 WiFi 抢 —— 两全。 */
+    if (xTaskCreatePinnedToCore(audio_task, "audio", AUDIO_STACK, NULL, 6, NULL, 1) != pdPASS) {
         ESP_LOGE(TAG, "音频任务创建失败（内部 RAM 最大块不够 %d 字节）",
                  (int)AUDIO_STACK);
         return;
@@ -365,9 +361,15 @@ bool player_play(const song_t *song, int quality)
 
 void player_toggle(void)
 {
-    if (!s_q) return;
-    cmd_t c = { .type = CMD_TOGGLE };
-    xQueueSend(s_q, &c, 0);
+    /* 暂停/继续不经过命令队列：解码循环常常阻塞在 esp_http_client_read()
+       里几十到几百毫秒，命令排在队列里要等 read 返回才处理 —— 用户按 OK
+       感觉「暂停跟没暂停一样」。s_paused / s_state 是 volatile，UI 直接改
+       立即生效；audio_task 每轮循环都会读它。 */
+    if (s_state != PLAYER_PLAYING && s_state != PLAYER_PAUSED) {
+        return;
+    }
+    s_paused = !s_paused;
+    s_state = s_paused ? PLAYER_PAUSED : PLAYER_PLAYING;
 }
 
 void player_stop(void)
